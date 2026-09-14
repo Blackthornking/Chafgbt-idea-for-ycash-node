@@ -1,0 +1,338 @@
+name: Build Ycash Android Node
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  ANDROID_API: "35"
+  ANDROID_NDK: "27.2.12479018"
+  RUST_TARGET: "aarch64-linux-android"
+
+jobs:
+  build:
+    name: Build Android ARM64 Ycash Node
+    runs-on: ubuntu-24.04
+
+    steps:
+      # ------------------------------------------------------------
+      # 1. Get repository
+      # ------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------
+      # 2. Find and extract ZIP
+      # ------------------------------------------------------------
+      - name: Find project ZIP
+        id: find_zip
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZIP="$(find . -maxdepth 1 -type f -iname '*.zip' | head -n 1)"
+
+          if [ -z "$ZIP" ]; then
+            echo "::error::No ZIP file found in repository root."
+            exit 1
+          fi
+
+          echo "Using ZIP: $ZIP"
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+
+      - name: Extract ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf extracted
+          mkdir -p extracted
+
+          unzip -q -o "${{ steps.find_zip.outputs.zip }}" -d extracted
+
+          echo "Extracted files:"
+          find extracted -maxdepth 3 -type f | sort | head -200
+
+      # ------------------------------------------------------------
+      # 3. Locate Android project
+      # ------------------------------------------------------------
+      - name: Locate Android project
+        id: locate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT="$(find extracted -name settings.gradle.kts -print -quit)"
+
+          if [ -z "$PROJECT" ]; then
+            echo "::error::Could not find settings.gradle.kts."
+            exit 1
+          fi
+
+          PROJECT_DIR="$(dirname "$PROJECT")"
+
+          echo "Android project: $PROJECT_DIR"
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+
+      # ------------------------------------------------------------
+      # 4. Install Java
+      # ------------------------------------------------------------
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      # ------------------------------------------------------------
+      # 5. Install Android SDK + NDK
+      # ------------------------------------------------------------
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sdkmanager "platform-tools"
+          sdkmanager "platforms;android-${ANDROID_API}"
+          sdkmanager "build-tools;35.0.0"
+          sdkmanager "ndk;${ANDROID_NDK}"
+
+          yes | sdkmanager --licenses >/dev/null || true
+
+      # ------------------------------------------------------------
+      # 6. Install Rust
+      # ------------------------------------------------------------
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.RUST_TARGET }}
+
+      # ------------------------------------------------------------
+      # 7. Locate ycashd source
+      # ------------------------------------------------------------
+      - name: Locate ycashd source
+        id: ycashd
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SOURCE="$(find extracted -type f -name configure.ac -path '*ycashd*' -print -quit || true)"
+
+          if [ -z "$SOURCE" ]; then
+            SOURCE="$(find extracted -type f -name configure.ac -print -quit || true)"
+          fi
+
+          if [ -z "$SOURCE" ]; then
+            echo "::error::Could not locate ycashd source."
+            exit 1
+          fi
+
+          YDIR="$(dirname "$SOURCE")"
+
+          echo "ycashd source: $YDIR"
+          echo "ycashd_dir=$YDIR" >> "$GITHUB_OUTPUT"
+
+      # ------------------------------------------------------------
+      # 8. Inspect source
+      # ------------------------------------------------------------
+      - name: Inspect source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          YDIR="${{ steps.ycashd.outputs.ycashd_dir }}"
+
+          echo "===== ycashd ====="
+          ls -la "$YDIR"
+
+          echo "===== configure ====="
+          test -f "$YDIR/configure.ac"
+
+          echo "===== Makefile ====="
+          test -f "$YDIR/Makefile.am"
+
+          echo "===== Rust ====="
+          test -f "$YDIR/Cargo.toml" || true
+
+      # ------------------------------------------------------------
+      # 9. Configure Android toolchain
+      # ------------------------------------------------------------
+      - name: Configure Android ARM64 environment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          NDK="$ANDROID_HOME/ndk/$ANDROID_NDK"
+
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+          echo "NDK=$NDK"
+          echo "TOOLCHAIN=$TOOLCHAIN"
+
+          test -x "$TOOLCHAIN/aarch64-linux-android35-clang"
+          test -x "$TOOLCHAIN/aarch64-linux-android35-clang++"
+
+          echo "CC=$TOOLCHAIN/aarch64-linux-android35-clang" >> "$GITHUB_ENV"
+          echo "CXX=$TOOLCHAIN/aarch64-linux-android35-clang++" >> "$GITHUB_ENV"
+          echo "AR=$TOOLCHAIN/llvm-ar" >> "$GITHUB_ENV"
+          echo "RANLIB=$TOOLCHAIN/llvm-ranlib" >> "$GITHUB_ENV"
+
+          echo "$TOOLCHAIN" >> "$GITHUB_PATH"
+
+      # ------------------------------------------------------------
+      # 10. Try native ycashd Android build
+      #
+      # This intentionally builds the REAL daemon.
+      # It does not substitute a mock/lightwallet client.
+      # ------------------------------------------------------------
+      - name: Build ycashd for Android ARM64
+        shell: bash
+        working-directory: ${{ steps.ycashd.outputs.ycashd_dir }}
+        run: |
+          set -euo pipefail
+
+          echo "Starting Android ARM64 ycashd build..."
+
+          chmod +x autogen.sh || true
+
+          if [ -x ./autogen.sh ]; then
+            ./autogen.sh
+          fi
+
+          ./configure \
+            --host=aarch64-linux-android \
+            --disable-wallet \
+            --disable-mining \
+            --disable-tests \
+            --disable-bench
+
+          make -j"$(nproc)"
+
+      # ------------------------------------------------------------
+      # 11. Find resulting ycashd
+      # ------------------------------------------------------------
+      - name: Find ycashd binary
+        id: binary
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          YDIR="${{ steps.ycashd.outputs.ycashd_dir }}"
+
+          BIN="$(find "$YDIR" -type f \
+            \( -name ycashd -o -name ycashd.exe \) \
+            -perm -111 \
+            -print -quit || true)"
+
+          if [ -z "$BIN" ]; then
+            echo "::error::Android ARM64 ycashd binary was not produced."
+            echo "Searching build tree:"
+            find "$YDIR" -type f -perm -111 | head -100
+            exit 1
+          fi
+
+          file "$BIN"
+
+          echo "binary=$BIN" >> "$GITHUB_OUTPUT"
+
+      # ------------------------------------------------------------
+      # 12. Install daemon into Android assets
+      # ------------------------------------------------------------
+      - name: Package ycashd into Android application
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT="${{ steps.locate.outputs.project_dir }}"
+          BIN="${{ steps.binary.outputs.binary }}"
+
+          mkdir -p "$PROJECT/app/src/main/node-assets"
+
+          cp "$BIN" "$PROJECT/app/src/main/node-assets/ycashd"
+          chmod 755 "$PROJECT/app/src/main/node-assets/ycashd"
+
+          echo "Packaged daemon:"
+          ls -lh "$PROJECT/app/src/main/node-assets/ycashd"
+
+          file "$PROJECT/app/src/main/node-assets/ycashd"
+
+      # ------------------------------------------------------------
+      # 13. Generate Gradle wrapper if necessary
+      # ------------------------------------------------------------
+      - name: Prepare Gradle
+        working-directory: ${{ steps.locate.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ ! -f gradlew ]; then
+            echo "Gradle wrapper not present; generating one."
+
+            gradle wrapper \
+              --gradle-version 8.7
+          fi
+
+          chmod +x gradlew
+
+      # ------------------------------------------------------------
+      # 14. Build APK
+      # ------------------------------------------------------------
+      - name: Build release APK
+        working-directory: ${{ steps.locate.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ./gradlew \
+            --no-daemon \
+            --stacktrace \
+            assembleRelease
+
+      # ------------------------------------------------------------
+      # 15. Locate APK
+      # ------------------------------------------------------------
+      - name: Locate APK
+        id: apk
+        working-directory: ${{ steps.locate.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="$(find app/build/outputs/apk -type f -name '*.apk' -print -quit)"
+
+          if [ -z "$APK" ]; then
+            echo "::error::No APK was produced."
+            find app/build -type f | sort | head -200
+            exit 1
+          fi
+
+          echo "APK: $APK"
+          echo "apk=$APK" >> "$GITHUB_OUTPUT"
+
+      # ------------------------------------------------------------
+      # 16. Upload APK
+      # ------------------------------------------------------------
+      - name: Upload Android APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: YcashNode-Android-ARM64
+          path: ${{ steps.locate.outputs.project_dir }}/${{ steps.apk.outputs.apk }}
+          if-no-files-found: error
+
+      # ------------------------------------------------------------
+      # 17. Upload daemon separately for debugging
+      # ------------------------------------------------------------
+      - name: Upload ycashd ARM64 binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ycashd-Android-ARM64
+          path: ${{ steps.binary.outputs.binary }}
+          if-no-files-found: error
