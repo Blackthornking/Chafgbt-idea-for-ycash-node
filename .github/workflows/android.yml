@@ -391,7 +391,7 @@ jobs:
           export CPPFLAGS="-I$VCPKG_INSTALLED/include"
 
           export CXXFLAGS="${CXXFLAGS:-} -stdlib=libc++"
-          export LDFLAGS="-L$VCPKG_INSTALLED/lib -stdlib=libc++ -shared-libc++ -fPIE -pie -llog"
+          export LDFLAGS="-L$VCPKG_INSTALLED/lib -stdlib=libc++ -fPIE -pie -llog"
 
           ./configure \
             --host=aarch64-linux-android \
