@@ -1,5 +1,18 @@
-          
-        -name: Verify Android dependencies
+          VCPKG_INSTALLED="$VCPKG_ROOT/installed/$VCPKG_TRIPLET"
+
+          test -d "$VCPKG_INSTALLED/include/boost"
+          test -f "$VCPKG_INSTALLED/include/sodium.h"
+
+          echo "VCPKG_INSTALLED=$VCPKG_INSTALLED" >> "$GITHUB_ENV"
+
+          echo
+          echo "===== VCPKG INSTALLED ====="
+          ls -la "$VCPKG_INSTALLED"
+
+      # ============================================================
+      # 19. VERIFY DEPENDENCIES BEFORE YCASH BUILD
+      # ============================================================
+      - name: Verify Android dependencies
         shell: bash
         run: |
           set -euo pipefail
