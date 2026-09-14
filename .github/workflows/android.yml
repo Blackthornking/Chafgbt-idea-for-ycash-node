@@ -15,9 +15,17 @@ env:
   RUST_TARGET: "aarch64-linux-android"
   VCPKG_TRIPLET: "arm64-android"
 
+  # Pinned vcpkg environment for reproducible dependency builds.
+  # Change only deliberately when updating the dependency environment.
+  VCPKG_COMMIT: "2025.12.12"
+
   CI_KEY_ALIAS: "ycash-temp"
   CI_KEYSTORE_PASSWORD: "temporary123"
   CI_KEY_PASSWORD: "temporary123"
+
+  # Network/build resilience.
+  GIT_TERMINAL_PROMPT: "0"
+  VCPKG_DISABLE_METRICS: "1"
 
 jobs:
   build:
@@ -31,6 +39,9 @@ jobs:
       # ============================================================
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          retry-fetches: true
 
       # ============================================================
       # 2. FIND AND EXTRACT PROJECT ZIP
@@ -102,20 +113,6 @@ jobs:
 
       # ============================================================
       # 4. CREATE DEFAULT YCASH CONFIG
-      #
-      # This creates a safe default configuration inside the
-      # Android project's assets.
-      #
-      # APK location:
-      #
-      #   assets/ycash/ycash.conf
-      #
-      # The Android application can copy this file into its
-      # writable private node data directory on first launch.
-      #
-      # IMPORTANT:
-      # APK assets are read-only. The Options UI must edit the
-      # writable copy after it has been copied by the application.
       # ============================================================
       - name: Create default ycash.conf
         working-directory: ${{ steps.locate.outputs.project_dir }}
@@ -132,50 +129,20 @@ jobs:
           # ============================================================
           # Ycash Android Node Configuration
           # ============================================================
-          #
-          # This is the default configuration packaged with the
-          # Android Ycash node.
-          #
-          # On first launch, the Android application should copy this
-          # file to its writable private node data directory.
-          #
-          # The Options screen should modify the writable copy.
-          #
-          # ============================================================
 
-          # Run as a server/node.
           server=1
-
-          # Listen for peer connections.
           listen=1
 
-          # Local RPC interface.
           rpcbind=127.0.0.1
-
-          # Only allow local Android application RPC access.
           rpcallowip=127.0.0.1
 
-          # Maintain transaction index.
           txindex=1
           EOF
 
-          echo "=========================================="
-          echo "DEFAULT YCASH CONFIG CREATED"
-          echo "=========================================="
-
           test -f "$CONFIG_FILE"
 
-          echo
-          echo "Config path:"
-          echo "$CONFIG_FILE"
-
-          echo
-          echo "Config contents:"
+          echo "===== DEFAULT YCASH CONFIG ====="
           cat "$CONFIG_FILE"
-
-          echo
-          echo "Config size:"
-          wc -c "$CONFIG_FILE"
 
       # ============================================================
       # 5. FIX JVM TARGETS
@@ -235,11 +202,8 @@ jobs:
           PYEOF
           fi
 
-          echo "===== app/build.gradle.kts ====="
-          cat "$GRADLE_FILE"
-
       # ============================================================
-      # 6. JAVA
+      # 6. SET UP JAVA
       # ============================================================
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -254,15 +218,34 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK packages
+      - name: Install Android SDK packages with retry
         shell: bash
         run: |
           set -euo pipefail
 
-          sdkmanager "platform-tools"
-          sdkmanager "platforms;android-${ANDROID_API}"
-          sdkmanager "build-tools;35.0.0"
-          sdkmanager "ndk;${ANDROID_NDK}"
+          retry() {
+            local attempts=5
+            local delay=10
+            local n=1
+
+            until "$@"; do
+              if [ "$n" -ge "$attempts" ]; then
+                echo "::error::Command failed after $attempts attempts."
+                return 1
+              fi
+
+              echo "Attempt $n failed. Retrying in ${delay}s..."
+              sleep "$delay"
+
+              n=$((n + 1))
+              delay=$((delay * 2))
+            done
+          }
+
+          retry sdkmanager "platform-tools"
+          retry sdkmanager "platforms;android-${ANDROID_API}"
+          retry sdkmanager "build-tools;35.0.0"
+          retry sdkmanager "ndk;${ANDROID_NDK}"
 
           yes | sdkmanager --licenses >/dev/null || true
 
@@ -321,14 +304,10 @@ jobs:
 
           YDIR="${{ steps.ycashd.outputs.ycashd_dir }}"
 
-          echo "===== ycashd ====="
           ls -la "$YDIR"
 
           test -f "$YDIR/configure.ac"
           test -f "$YDIR/Makefile.am"
-
-          echo "===== Rust ====="
-          test -f "$YDIR/Cargo.toml" || true
 
       # ============================================================
       # 11. ANDROID ARM64 TOOLCHAIN
@@ -339,11 +318,7 @@ jobs:
           set -euo pipefail
 
           NDK="$ANDROID_HOME/ndk/$ANDROID_NDK"
-
           TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
-
-          echo "NDK=$NDK"
-          echo "TOOLCHAIN=$TOOLCHAIN"
 
           test -x "$TOOLCHAIN/aarch64-linux-android35-clang"
           test -x "$TOOLCHAIN/aarch64-linux-android35-clang++"
@@ -359,7 +334,7 @@ jobs:
           echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
 
       # ============================================================
-      # 12. LOCATE MATCHING NDK LIBC++ RUNTIME
+      # 12. LOCATE MATCHING NDK LIBC++
       # ============================================================
       - name: Locate matching NDK libc++ runtime
         id: libcxx
@@ -371,12 +346,6 @@ jobs:
 
           LIBCXX="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
 
-          echo "NDK:"
-          echo "$NDK"
-
-          echo "Expected libc++ runtime:"
-          echo "$LIBCXX"
-
           if [ ! -f "$LIBCXX" ]; then
             echo "::error::Matching libc++_shared.so was not found."
 
@@ -387,8 +356,6 @@ jobs:
 
             exit 1
           fi
-
-          echo "libc++_shared.so found."
 
           file "$LIBCXX"
           ls -lh "$LIBCXX"
@@ -413,47 +380,135 @@ jobs:
           cat "$HOME/.cargo/config.toml"
 
       # ============================================================
-      # 14. AUTOTOOLS
+      # 14. INSTALL BUILD TOOLS
       # ============================================================
-      - name: Install autotools for vcpkg
+      - name: Install autotools and build utilities
         shell: bash
         run: |
           set -euo pipefail
 
-          sudo apt-get update
+          retry() {
+            local attempts=5
+            local delay=10
+            local n=1
 
-          sudo apt-get install -y \
+            until "$@"; do
+              if [ "$n" -ge "$attempts" ]; then
+                return 1
+              fi
+
+              sleep "$delay"
+              n=$((n + 1))
+              delay=$((delay * 2))
+            done
+          }
+
+          retry sudo apt-get update
+
+          retry sudo apt-get install -y \
             autoconf \
             autoconf-archive \
             automake \
-            libtool
+            libtool \
+            pkg-config \
+            curl \
+            unzip \
+            git
 
       # ============================================================
-      # 15. VCPKG
+      # 15. SET UP PINNED VCPKG
       # ============================================================
-      - name: Set up vcpkg
+      - name: Set up pinned vcpkg
         shell: bash
         run: |
           set -euo pipefail
 
-          git clone \
+          VCPKG_DIR="$HOME/vcpkg"
+
+          if [ -d "$VCPKG_DIR/.git" ]; then
+            echo "Existing vcpkg checkout found."
+          else
+            echo "Cloning vcpkg..."
+
+            git clone \
+              --depth 1 \
+              https://github.com/microsoft/vcpkg.git \
+              "$VCPKG_DIR"
+          fi
+
+          cd "$VCPKG_DIR"
+
+          echo "Checking out pinned vcpkg version: $VCPKG_COMMIT"
+
+          git fetch \
             --depth 1 \
-            https://github.com/microsoft/vcpkg.git \
-            "$HOME/vcpkg"
+            origin \
+            "$VCPKG_COMMIT"
 
-          "$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          git checkout "$VCPKG_COMMIT"
 
-          echo "VCPKG_ROOT=$HOME/vcpkg" >> "$GITHUB_ENV"
+          ./bootstrap-vcpkg.sh -disableMetrics
+
+          echo "VCPKG_ROOT=$VCPKG_DIR" >> "$GITHUB_ENV"
+
+          echo
+          echo "===== VCPKG VERSION ====="
+          ./vcpkg version
 
       # ============================================================
-      # 16. BUILD ANDROID DEPENDENCIES
+      # 16. CACHE VCPKG DOWNLOADS
+      # ============================================================
+      - name: Cache vcpkg downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.VCPKG_ROOT }}/downloads
+          key: vcpkg-downloads-${{ runner.os }}-${{ env.VCPKG_COMMIT }}
+          restore-keys: |
+            vcpkg-downloads-${{ runner.os }}-
+
+      # ============================================================
+      # 17. CACHE VCPKG INSTALLED PACKAGES
+      # ============================================================
+      - name: Cache vcpkg installed dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.VCPKG_ROOT }}/installed
+            ${{ env.VCPKG_ROOT }}/buildtrees
+          key: vcpkg-installed-${{ runner.os }}-${{ env.VCPKG_TRIPLET }}-${{ env.VCPKG_COMMIT }}-${{ hashFiles('**/vcpkg.json', '**/vcpkg-configuration.json') }}
+          restore-keys: |
+            vcpkg-installed-${{ runner.os }}-${{ env.VCPKG_TRIPLET }}-${{ env.VCPKG_COMMIT }}-
+            vcpkg-installed-${{ runner.os }}-${{ env.VCPKG_TRIPLET }}-
+
+      # ============================================================
+      # 18. BUILD ANDROID DEPENDENCIES
       # ============================================================
       - name: Build Boost, libevent, libsodium for Android ARM64
         shell: bash
         run: |
           set -euo pipefail
 
-          "$VCPKG_ROOT/vcpkg" install \
+          retry() {
+            local attempts=5
+            local delay=10
+            local n=1
+
+            until "$@"; do
+              if [ "$n" -ge "$attempts" ]; then
+                echo "::error::Dependency command failed after $attempts attempts."
+                return 1
+              fi
+
+              echo "Dependency command failed. Retrying in ${delay}s..."
+              sleep "$delay"
+
+              n=$((n + 1))
+              delay=$((delay * 2))
+            done
+          }
+
+          retry "$VCPKG_ROOT/vcpkg" install \
             boost-system \
             boost-filesystem \
             boost-program-options \
@@ -472,7 +527,8 @@ jobs:
             boost-scope-exit \
             libevent \
             libsodium \
-            --triplet "$VCPKG_TRIPLET"
+            --triplet "$VCPKG_TRIPLET" \
+            --clean-after-build
 
           VCPKG_INSTALLED="$VCPKG_ROOT/installed/$VCPKG_TRIPLET"
 
@@ -481,8 +537,39 @@ jobs:
 
           echo "VCPKG_INSTALLED=$VCPKG_INSTALLED" >> "$GITHUB_ENV"
 
+          echo
+          echo "===== VCPKG INSTALLED ====="
+          ls -la "$VCPKG_INSTALLED"
+
       # ============================================================
-      # 17. BUILD REAL YCASHD
+      # 19. VERIFY DEPENDENCIES BEFORE YCASH BUILD
+      # ============================================================
+      - name: Verify Android dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -d "$VCPKG_INSTALLED/include/boost"
+          test -f "$VCPKG_INSTALLED/include/sodium.h"
+
+          test -d "$VCPKG_INSTALLED/lib"
+
+          echo "Boost:"
+          ls "$VCPKG_INSTALLED/lib" | grep boost | head -30 || true
+
+          echo
+          echo "libevent:"
+          ls "$VCPKG_INSTALLED/lib" | grep event | head -30 || true
+
+          echo
+          echo "libsodium:"
+          ls "$VCPKG_INSTALLED/lib" | grep sodium || true
+
+          echo
+          echo "Android dependencies verified."
+
+      # ============================================================
+      # 20. BUILD REAL YCASHD
       # ============================================================
       - name: Build ycashd for Android ARM64
         working-directory: ${{ steps.ycashd.outputs.ycashd_dir }}
@@ -519,7 +606,7 @@ jobs:
           make -j"$(nproc)"
 
       # ============================================================
-      # 18. FIND YCASHD BINARY
+      # 21. FIND YCASHD BINARY
       # ============================================================
       - name: Find ycashd binary
         id: binary
@@ -556,7 +643,7 @@ jobs:
           echo "binary=$BIN" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 19. INSPECT YCASHD ELF DEPENDENCIES
+      # 22. INSPECT YCASHD ELF DEPENDENCIES
       # ============================================================
       - name: Inspect ycashd native dependencies
         shell: bash
@@ -565,31 +652,16 @@ jobs:
 
           BIN="${{ steps.binary.outputs.binary }}"
 
-          echo "=========================================="
-          echo "YCASHD ELF DEPENDENCIES"
-          echo "=========================================="
-
           file "$BIN"
 
-          echo
-          echo "DT_NEEDED entries:"
+          echo "===== DT_NEEDED ====="
 
           readelf -d "$BIN" \
             | grep "NEEDED" \
             || true
 
-          echo
-          echo "Searching for libc++ dependency:"
-
-          if readelf -d "$BIN" | grep -q "libc++_shared.so"; then
-            echo "libc++_shared.so is a required dependency."
-          else
-            echo "::warning::libc++_shared.so is not shown directly in DT_NEEDED."
-            echo "The dependency chain will still be checked after packaging."
-          fi
-
       # ============================================================
-      # 20. PACKAGE YCASHD + MATCHING LIBC++
+      # 23. PACKAGE YCASHD + MATCHING LIBC++
       # ============================================================
       - name: Package ycashd and libc++ into Android application
         shell: bash
@@ -609,14 +681,8 @@ jobs:
 
           cp "$BIN" "$JNI_DIR/libycashd.so"
 
-          echo "===== ycashd before stripping ====="
-          ls -lh "$JNI_DIR/libycashd.so"
-          file "$JNI_DIR/libycashd.so"
-
           if [ -x "${STRIP:-}" ]; then
             "$STRIP" --strip-unneeded "$JNI_DIR/libycashd.so"
-          else
-            echo "::warning::llvm-strip not found; shipping unstripped ycashd."
           fi
 
           chmod 755 "$JNI_DIR/libycashd.so"
@@ -625,30 +691,16 @@ jobs:
 
           chmod 644 "$JNI_DIR/libc++_shared.so"
 
-          echo
-          echo "=========================================="
-          echo "PACKAGED NATIVE LIBRARIES"
-          echo "=========================================="
+          test -f "$JNI_DIR/libycashd.so"
+          test -f "$JNI_DIR/libc++_shared.so"
+
+          echo "===== PACKAGED NATIVE LIBRARIES ====="
 
           ls -lh "$JNI_DIR/libycashd.so"
           ls -lh "$JNI_DIR/libc++_shared.so"
 
-          file "$JNI_DIR/libycashd.so"
-          file "$JNI_DIR/libc++_shared.so"
-
-          echo
-          echo "Native library directory:"
-          find "$JNI_DIR" \
-            -maxdepth 1 \
-            -type f \
-            -printf '%f\n' \
-            | sort
-
-          test -f "$JNI_DIR/libycashd.so"
-          test -f "$JNI_DIR/libc++_shared.so"
-
       # ============================================================
-      # 21. VERIFY PACKAGED NATIVE LIBRARIES
+      # 24. VERIFY PACKAGED NATIVE LIBRARIES
       # ============================================================
       - name: Verify packaged native libraries
         shell: bash
@@ -663,46 +715,15 @@ jobs:
           test -f "$DAEMON"
           test -f "$LIBCXX"
 
-          echo "=========================================="
-          echo "PACKAGED NATIVE LIBRARY VERIFICATION"
-          echo "=========================================="
-
-          echo
-          echo "ycashd:"
           file "$DAEMON"
-          ls -lh "$DAEMON"
-
-          echo
-          echo "libc++_shared.so:"
           file "$LIBCXX"
-          ls -lh "$LIBCXX"
-
-          echo
-          echo "===== ycashd DT_NEEDED ====="
 
           readelf -d "$DAEMON" \
             | grep "NEEDED" \
             || true
 
-          echo
-          echo "===== libc++ DT_NEEDED ====="
-
-          readelf -d "$LIBCXX" \
-            | grep "NEEDED" \
-            || true
-
-          echo
-          echo "===== Confirm libc++ runtime ====="
-
-          if [ ! -s "$LIBCXX" ]; then
-            echo "::error::libc++_shared.so is empty."
-            exit 1
-          fi
-
-          echo "libc++_shared.so exists and is non-empty."
-
       # ============================================================
-      # 22. VERIFY PACKAGED YCASHD
+      # 25. VERIFY PACKAGED YCASHD
       # ============================================================
       - name: Verify packaged ycashd
         shell: bash
@@ -710,27 +731,20 @@ jobs:
           set -euo pipefail
 
           PROJECT="${{ steps.locate.outputs.project_dir }}"
-
           DAEMON="$PROJECT/app/src/main/jniLibs/arm64-v8a/libycashd.so"
 
           test -f "$DAEMON"
           test -x "$DAEMON"
 
-          echo "===== ycashd ELF header ====="
-
           file "$DAEMON"
 
           if ! file "$DAEMON" | grep -qi "pie executable"; then
-            echo "::error::ycashd is not a PIE executable; Android may refuse to run it."
+            echo "::error::ycashd is not a PIE executable."
             exit 1
           fi
 
-          echo "===== ycashd permissions ====="
-
-          ls -l "$DAEMON"
-
       # ============================================================
-      # 23. CONFIRM NATIVE LIBRARY PACKAGING SETTINGS
+      # 26. CONFIRM NATIVE LIBRARY PACKAGING SETTINGS
       # ============================================================
       - name: Confirm native library packaging
         working-directory: ${{ steps.locate.outputs.project_dir }}
@@ -741,43 +755,23 @@ jobs:
           MANIFEST="app/src/main/AndroidManifest.xml"
           GRADLE_FILE="app/build.gradle.kts"
 
-          if [ ! -f "$MANIFEST" ]; then
-            echo "::error::$MANIFEST not found."
-            exit 1
-          fi
-
-          if [ ! -f "$GRADLE_FILE" ]; then
-            echo "::error::$GRADLE_FILE not found."
-            exit 1
-          fi
-
-          echo "===== AndroidManifest.xml native extraction ====="
+          test -f "$MANIFEST"
+          test -f "$GRADLE_FILE"
 
           if ! grep -q 'android:extractNativeLibs="true"' "$MANIFEST"; then
-            echo "::error::extractNativeLibs is not true."
+            echo "::error::extractNativeLibs=true was not found."
             exit 1
           fi
-
-          echo "extractNativeLibs=true confirmed."
-
-          echo
-          echo "===== Gradle JNI packaging ====="
 
           if ! grep -q 'useLegacyPackaging = true' "$GRADLE_FILE"; then
-            echo "::error::jniLibs.useLegacyPackaging = true was not found."
+            echo "::error::useLegacyPackaging=true was not found."
             exit 1
           fi
 
-          echo "useLegacyPackaging=true confirmed."
-
-          echo
-          echo "Native library packaging settings are correct."
+          echo "Native library packaging settings confirmed."
 
       # ============================================================
-      # 24. VERIFY DEFAULT YCASH CONFIG BEFORE APK BUILD
-      #
-      # This confirms that the config created in step 4 still exists
-      # immediately before Gradle packages the application.
+      # 27. VERIFY DEFAULT YCASH CONFIG
       # ============================================================
       - name: Verify default ycash.conf
         working-directory: ${{ steps.locate.outputs.project_dir }}
@@ -787,32 +781,14 @@ jobs:
 
           CONFIG_FILE="app/src/main/assets/ycash/ycash.conf"
 
-          echo "=========================================="
-          echo "VERIFY DEFAULT YCASH CONFIG"
-          echo "=========================================="
+          test -f "$CONFIG_FILE"
+          test -s "$CONFIG_FILE"
 
-          if [ ! -f "$CONFIG_FILE" ]; then
-            echo "::error::ycash.conf is missing."
-            exit 1
-          fi
-
-          if [ ! -s "$CONFIG_FILE" ]; then
-            echo "::error::ycash.conf is empty."
-            exit 1
-          fi
-
-          echo "Config found:"
-          echo "$CONFIG_FILE"
-
-          echo
-          echo "===== Config ====="
+          echo "===== CONFIG ====="
           cat "$CONFIG_FILE"
 
-          echo
-          echo "Config verification successful."
-
       # ============================================================
-      # 25. PREPARE GRADLE
+      # 28. PREPARE GRADLE
       # ============================================================
       - name: Prepare Gradle
         working-directory: ${{ steps.locate.outputs.project_dir }}
@@ -821,16 +797,17 @@ jobs:
           set -euo pipefail
 
           if [ ! -f gradlew ]; then
-            echo "Gradle wrapper not present; generating one."
 
             if ! command -v gradle >/dev/null 2>&1; then
-              echo "Installing Gradle locally..."
 
               GRADLE_VERSION="8.7"
 
-              curl -fsSL \
-                "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
-                -o "$RUNNER_TEMP/gradle.zip"
+              curl --retry 5 \
+                   --retry-delay 10 \
+                   --retry-all-errors \
+                   -fsSL \
+                   "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
+                   -o "$RUNNER_TEMP/gradle.zip"
 
               rm -rf "$RUNNER_TEMP/gradle"
 
@@ -847,11 +824,10 @@ jobs:
 
           chmod +x gradlew
 
-          echo "Gradle wrapper:"
           ./gradlew --version
 
       # ============================================================
-      # 26. GENERATE TEMPORARY SIGNING KEY
+      # 29. GENERATE TEMPORARY SIGNING KEY
       # ============================================================
       - name: Generate temporary signing key
         shell: bash
@@ -879,10 +855,8 @@ jobs:
 
           echo "KEYSTORE=$KEYSTORE" >> "$GITHUB_ENV"
 
-          echo "Temporary CI signing key generated."
-
       # ============================================================
-      # 27. BUILD RELEASE APK
+      # 30. BUILD RELEASE APK
       # ============================================================
       - name: Build release APK
         id: build_apk
@@ -894,9 +868,8 @@ jobs:
           ./gradlew \
             --no-daemon \
             --stacktrace \
+            --refresh-dependencies \
             assembleRelease
-
-          echo "===== Release APKs ====="
 
           find "$PWD/app/build/outputs/apk" \
             -type f \
@@ -904,9 +877,9 @@ jobs:
             -print
 
       # ============================================================
-      # 28. LOCATE APK
+      # 31. LOCATE APK
       # ============================================================
-      - name: Locate unsigned APK
+      - name: Locate APK
         id: unsigned_apk
         working-directory: ${{ steps.locate.outputs.project_dir }}
         shell: bash
@@ -922,19 +895,10 @@ jobs:
 
           if [ -z "$APK" ]; then
             echo "::error::No APK was produced."
-
-            find "$PWD/app/build" \
-              -type f \
-              | sort \
-              | head -300
-
             exit 1
           fi
 
           APK="$(realpath "$APK")"
-
-          echo "Unsigned APK:"
-          echo "$APK"
 
           file "$APK"
           ls -lh "$APK"
@@ -942,9 +906,7 @@ jobs:
           echo "apk=$APK" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 29. VERIFY CONFIG IS INSIDE APK
-      #
-      # This is the new critical APK-level config check.
+      # 32. VERIFY CONFIG INSIDE APK
       # ============================================================
       - name: Verify ycash.conf inside APK
         shell: bash
@@ -955,30 +917,10 @@ jobs:
 
           test -f "$APK"
 
-          echo "=========================================="
-          echo "VERIFYING YCASH CONFIG INSIDE APK"
-          echo "=========================================="
-
-          if ! unzip -l "$APK" \
-              | grep -q 'assets/ycash/ycash.conf'; then
-            echo "::error::ycash.conf is missing from APK."
-            exit 1
-          fi
-
-          echo "ycash.conf FOUND inside APK."
-
-          echo
-          echo "===== APK config entry ====="
-
           unzip -l "$APK" \
-            | grep 'assets/ycash/ycash.conf'
-
-          echo
-          echo "===== Extracting config for verification ====="
+            | grep -q 'assets/ycash/ycash.conf'
 
           TEMP_CONFIG="$RUNNER_TEMP/ycash.conf"
-
-          rm -f "$TEMP_CONFIG"
 
           unzip -p "$APK" \
             'assets/ycash/ycash.conf' \
@@ -986,16 +928,11 @@ jobs:
 
           test -s "$TEMP_CONFIG"
 
-          echo
-          echo "===== Packaged config contents ====="
-
+          echo "===== PACKAGED YCASH CONFIG ====="
           cat "$TEMP_CONFIG"
 
-          echo
-          echo "Ycash configuration successfully packaged into APK."
-
       # ============================================================
-      # 30. VERIFY REQUIRED NATIVE LIBRARIES ARE IN APK
+      # 33. VERIFY NATIVE LIBRARIES INSIDE APK
       # ============================================================
       - name: Verify native libraries inside APK
         shell: bash
@@ -1004,73 +941,16 @@ jobs:
 
           APK="${{ steps.unsigned_apk.outputs.apk }}"
 
-          test -f "$APK"
-
-          echo "=========================================="
-          echo "VERIFYING NATIVE LIBRARIES IN APK"
-          echo "=========================================="
-
-          echo
-          echo "Searching APK for libycashd.so..."
-
-          if ! unzip -l "$APK" | grep -q 'lib/arm64-v8a/libycashd.so'; then
-            echo "::error::libycashd.so is missing from APK."
-            exit 1
-          fi
-
-          echo "libycashd.so FOUND."
-
-          echo
-          echo "Searching APK for libc++_shared.so..."
-
-          if ! unzip -l "$APK" | grep -q 'lib/arm64-v8a/libc++_shared.so'; then
-            echo "::error::libc++_shared.so is missing from APK."
-            exit 1
-          fi
-
-          echo "libc++_shared.so FOUND."
-
-          echo
-          echo "===== Native libraries in APK ====="
+          unzip -l "$APK" \
+            | grep -q 'lib/arm64-v8a/libycashd.so'
 
           unzip -l "$APK" \
-            | grep 'lib/arm64-v8a/'
+            | grep -q 'lib/arm64-v8a/libc++_shared.so'
 
-          echo
-          echo "Both required ARM64 native libraries are inside the APK."
-
-      # ============================================================
-      # 31. VERIFY LIBRARY COMPRESSION
-      # ============================================================
-      - name: Verify native libraries are stored uncompressed
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APK="${{ steps.unsigned_apk.outputs.apk }}"
-
-          echo "=========================================="
-          echo "NATIVE LIBRARY COMPRESSION CHECK"
-          echo "=========================================="
-
-          echo
-          echo "ycashd:"
-          unzip -v "$APK" \
-            | grep 'lib/arm64-v8a/libycashd.so' \
-            || true
-
-          echo
-          echo "libc++:"
-          unzip -v "$APK" \
-            | grep 'lib/arm64-v8a/libc++_shared.so' \
-            || true
-
-          echo
-          echo "The Gradle packaging configuration is expected to store"
-          echo "these native libraries uncompressed."
+          echo "Both ARM64 native libraries are present."
 
       # ============================================================
-      # 32. ZIPALIGN APK
+      # 34. ZIPALIGN APK
       # ============================================================
       - name: Zipalign APK
         id: aligned
@@ -1080,18 +960,8 @@ jobs:
 
           INPUT="${{ steps.unsigned_apk.outputs.apk }}"
 
-          BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
-          ZIPALIGN="$BUILD_TOOLS/zipalign"
-
+          ZIPALIGN="$ANDROID_HOME/build-tools/35.0.0/zipalign"
           ALIGNED="$RUNNER_TEMP/YcashNode-Android-ARM64-aligned.apk"
-
-          echo "INPUT=$INPUT"
-          echo "ALIGNED=$ALIGNED"
-
-          test -f "$INPUT"
-          test -x "$ZIPALIGN"
-
-          rm -f "$ALIGNED"
 
           "$ZIPALIGN" \
             -f \
@@ -1102,13 +972,10 @@ jobs:
 
           test -f "$ALIGNED"
 
-          echo "Aligned APK:"
-          ls -lh "$ALIGNED"
-
           echo "apk=$ALIGNED" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 33. SIGN FINAL APK
+      # 35. SIGN FINAL APK
       # ============================================================
       - name: Sign final APK with temporary CI key
         id: signed
@@ -1118,19 +985,8 @@ jobs:
 
           INPUT="${{ steps.aligned.outputs.apk }}"
 
-          BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
-          APKSIGNER="$BUILD_TOOLS/apksigner"
-
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
           SIGNED="$RUNNER_TEMP/YcashNode-Android-ARM64-SIGNED.apk"
-
-          echo "INPUT=$INPUT"
-          echo "SIGNED=$SIGNED"
-
-          test -f "$INPUT"
-          test -x "$APKSIGNER"
-          test -f "$KEYSTORE"
-
-          rm -f "$SIGNED"
 
           "$APKSIGNER" sign \
             --ks "$KEYSTORE" \
@@ -1143,13 +999,10 @@ jobs:
 
           test -f "$SIGNED"
 
-          echo "Signed APK:"
-          ls -lh "$SIGNED"
-
           echo "apk=$SIGNED" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 34. VERIFY APK SIGNATURE
+      # 36. VERIFY APK SIGNATURE
       # ============================================================
       - name: Verify final APK signature
         shell: bash
@@ -1158,22 +1011,12 @@ jobs:
 
           APK="${{ steps.signed.outputs.apk }}"
 
-          BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
-          APKSIGNER="$BUILD_TOOLS/apksigner"
-
-          test -f "$APK"
-          test -x "$APKSIGNER"
-
-          echo "===== APK SIGNATURE VERIFICATION ====="
-
-          "$APKSIGNER" verify \
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify \
             --verbose \
             "$APK"
 
-          echo "===== APK VERIFIED ====="
-
       # ============================================================
-      # 35. VERIFY FINAL APK ALIGNMENT
+      # 37. VERIFY APK ALIGNMENT
       # ============================================================
       - name: Verify APK alignment
         shell: bash
@@ -1182,24 +1025,14 @@ jobs:
 
           APK="${{ steps.signed.outputs.apk }}"
 
-          BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
-          ZIPALIGN="$BUILD_TOOLS/zipalign"
-
-          test -f "$APK"
-          test -x "$ZIPALIGN"
-
-          "$ZIPALIGN" \
+          "$ANDROID_HOME/build-tools/35.0.0/zipalign" \
             -c \
             -p \
             4 \
             "$APK"
 
-          echo "APK alignment verified."
-
       # ============================================================
-      # 36. FINAL SIGNED APK CONFIG VERIFICATION
-      #
-      # Repeat the config check on the ACTUAL signed APK.
+      # 38. FINAL SIGNED APK CONFIG VERIFICATION
       # ============================================================
       - name: Verify final signed APK ycash.conf
         shell: bash
@@ -1208,32 +1041,16 @@ jobs:
 
           APK="${{ steps.signed.outputs.apk }}"
 
-          test -f "$APK"
+          unzip -l "$APK" \
+            | grep -q 'assets/ycash/ycash.conf'
 
-          echo "=========================================="
-          echo "FINAL SIGNED APK CONFIG VERIFICATION"
-          echo "=========================================="
-
-          if ! unzip -l "$APK" \
-              | grep -q 'assets/ycash/ycash.conf'; then
-            echo "::error::Final signed APK is missing ycash.conf."
-            exit 1
-          fi
-
-          echo "ycash.conf FOUND."
-
-          echo
-          echo "===== Final packaged config ====="
+          echo "===== FINAL SIGNED APK CONFIG ====="
 
           unzip -p "$APK" \
             'assets/ycash/ycash.conf'
 
-          echo
-          echo
-          echo "Final signed APK contains ycash.conf."
-
       # ============================================================
-      # 37. FINAL APK NATIVE LIBRARY VERIFICATION
+      # 39. FINAL NATIVE LIBRARY VERIFICATION
       # ============================================================
       - name: Verify final signed APK native libraries
         shell: bash
@@ -1242,47 +1059,17 @@ jobs:
 
           APK="${{ steps.signed.outputs.apk }}"
 
-          test -f "$APK"
-
-          echo "=========================================="
-          echo "FINAL SIGNED APK NATIVE VERIFICATION"
-          echo "=========================================="
-
-          echo
-          echo "libycashd.so:"
-
-          if ! unzip -l "$APK" \
-              | grep -q 'lib/arm64-v8a/libycashd.so'; then
-            echo "::error::Final signed APK is missing libycashd.so."
-            exit 1
-          fi
-
-          echo "FOUND"
-
-          echo
-          echo "libc++_shared.so:"
-
-          if ! unzip -l "$APK" \
-              | grep -q 'lib/arm64-v8a/libc++_shared.so'; then
-            echo "::error::Final signed APK is missing libc++_shared.so."
-            exit 1
-          fi
-
-          echo "FOUND"
-
-          echo
-          echo "===== Final native libraries ====="
+          unzip -l "$APK" \
+            | grep -q 'lib/arm64-v8a/libycashd.so'
 
           unzip -l "$APK" \
-            | grep 'lib/arm64-v8a/'
+            | grep -q 'lib/arm64-v8a/libc++_shared.so'
 
-          echo
-          echo "SUCCESS:"
-          echo "Both libycashd.so and libc++_shared.so are present"
-          echo "in the final signed ARM64 APK."
+          echo "libycashd.so PRESENT"
+          echo "libc++_shared.so PRESENT"
 
       # ============================================================
-      # 38. FINAL APK INSPECTION
+      # 40. FINAL APK INSPECTION
       # ============================================================
       - name: Inspect final APK
         shell: bash
@@ -1291,54 +1078,30 @@ jobs:
 
           APK="${{ steps.signed.outputs.apk }}"
 
-          test -f "$APK"
-
           echo "=========================================="
           echo "FINAL Ycash NODE APK"
           echo "=========================================="
 
           ls -lh "$APK"
-
           file "$APK"
 
           echo
-          echo "===== Signing ====="
+          echo "===== SIGNATURE ====="
 
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify \
             --verbose \
             "$APK"
 
           echo
-          echo "===== APK contents ====="
+          echo "===== CONTENTS ====="
 
           unzip -l "$APK" \
             | grep -E \
               'lib/arm64-v8a|assets/ycash/ycash.conf|AndroidManifest.xml' \
             | head -100
 
-          echo
-          echo "===== ycashd compression method ====="
-
-          unzip -v "$APK" \
-            | grep "libycashd.so" \
-            || true
-
-          echo
-          echo "===== libc++ compression method ====="
-
-          unzip -v "$APK" \
-            | grep "libc++_shared.so" \
-            || true
-
-          echo
-          echo "===== ycash.conf ====="
-
-          unzip -p "$APK" \
-            'assets/ycash/ycash.conf' \
-            || true
-
       # ============================================================
-      # 39. COPY FINAL APK TO WORKSPACE
+      # 41. COPY FINAL APK TO WORKSPACE
       # ============================================================
       - name: Prepare final APK artifact
         shell: bash
@@ -1346,22 +1109,16 @@ jobs:
           set -euo pipefail
 
           APK="${{ steps.signed.outputs.apk }}"
-
           OUT="$GITHUB_WORKSPACE/YcashNode-Android-ARM64-SIGNED.apk"
-
-          test -f "$APK"
-
-          rm -f "$OUT"
 
           cp "$APK" "$OUT"
 
           test -f "$OUT"
 
-          echo "Final artifact:"
           ls -lh "$OUT"
 
       # ============================================================
-      # 40. UPLOAD SIGNED ANDROID APK
+      # 42. UPLOAD SIGNED ANDROID APK
       # ============================================================
       - name: Upload signed Android APK
         uses: actions/upload-artifact@v4
@@ -1371,7 +1128,7 @@ jobs:
           if-no-files-found: error
 
       # ============================================================
-      # 41. UPLOAD YCASHD SEPARATELY
+      # 43. UPLOAD YCASHD SEPARATELY
       # ============================================================
       - name: Upload ycashd ARM64 binary
         uses: actions/upload-artifact@v4
@@ -1381,14 +1138,12 @@ jobs:
           if-no-files-found: error
 
       # ============================================================
-      # 42. CREATE BUILD INFORMATION
+      # 44. CREATE BUILD INFORMATION
       # ============================================================
       - name: Create build information
         shell: bash
         run: |
           set -euo pipefail
-
-          APK="${{ steps.signed.outputs.apk }}"
 
           cat > "$RUNNER_TEMP/ycash-build-info.txt" <<EOF
           Ycash Android Node
@@ -1406,6 +1161,18 @@ jobs:
           Rust target:
           ${RUST_TARGET}
 
+          vcpkg:
+          ${VCPKG_COMMIT}
+
+          Vcpkg downloads:
+          Cached
+
+          Vcpkg installed dependencies:
+          Cached
+
+          Network retry:
+          Enabled
+
           Build:
           Release
 
@@ -1415,53 +1182,30 @@ jobs:
           Signing:
           Temporary CI-generated development key
 
-          Permanent production signing key:
-          NOT USED
-
           ycashd:
-          Embedded in app nativeLibraryDir as libycashd.so
+          Embedded as libycashd.so
 
           C++ runtime:
-          Matching libc++_shared.so from NDK ${ANDROID_NDK}
-
-          Native library directory:
-          lib/arm64-v8a/
-
-          Required native libraries:
-          libycashd.so
-          libc++_shared.so
-
-          Native extraction:
-          Required for exec of ycashd
+          Matching libc++_shared.so
 
           Default configuration:
           assets/ycash/ycash.conf
 
-          Configuration:
-          Packaged into APK
-
           Configuration editing:
           Android application should copy the packaged config
-          to its writable private node directory on first launch.
+          into its writable private node directory on first launch.
 
           APK signature:
-          Verified with apksigner
+          Verified
 
           APK alignment:
-          Verified with zipalign -c -p 4
-
-          Final config verification:
-          assets/ycash/ycash.conf PRESENT
-
-          Final native-library verification:
-          libycashd.so PRESENT
-          libc++_shared.so PRESENT
+          Verified
           EOF
 
           cat "$RUNNER_TEMP/ycash-build-info.txt"
 
       # ============================================================
-      # 43. UPLOAD BUILD INFORMATION
+      # 45. UPLOAD BUILD INFORMATION
       # ============================================================
       - name: Upload build information
         uses: actions/upload-artifact@v4
