@@ -68,6 +68,7 @@ jobs:
             -d "$GITHUB_WORKSPACE/extracted"
 
           echo "===== Extracted files ====="
+
           find "$GITHUB_WORKSPACE/extracted" \
             -maxdepth 5 \
             -type f \
@@ -159,6 +160,145 @@ jobs:
 
           echo "===== app/build.gradle.kts ====="
           cat "$GRADLE_FILE"
+
+      # ============================================================
+      # 4b. FORCE NATIVE LIBRARY PACKAGING
+      # ============================================================
+      - name: Force uncompressed native library packaging
+        working-directory: ${{ steps.locate.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          GRADLE_FILE="app/build.gradle.kts"
+          MANIFEST="app/src/main/AndroidManifest.xml"
+          PROPERTIES="gradle.properties"
+
+          test -f "$GRADLE_FILE"
+          test -f "$MANIFEST"
+
+          echo "===== Forcing native library packaging ====="
+
+          python3 - "$GRADLE_FILE" <<'PYEOF'
+          import sys
+          import re
+
+          path = sys.argv[1]
+
+          with open(path, encoding="utf-8") as f:
+              content = f.read()
+
+          # Remove an existing generated packaging block so the
+          # workflow is safe to run repeatedly.
+          content = re.sub(
+              r'\n\s*packaging\s*\{\s*jniLibs\s*\{\s*useLegacyPackaging\s*=\s*true\s*\}\s*\}',
+              '',
+              content,
+              flags=re.MULTILINE
+          )
+
+          match = re.search(r'(?m)^android\s*\{', content)
+
+          if not match:
+              raise SystemExit(
+                  "Could not find android { block in app/build.gradle.kts"
+              )
+
+          insertion = '''
+              packaging {
+                  jniLibs {
+                      useLegacyPackaging = true
+                  }
+              }
+          '''
+
+          pos = match.end()
+
+          content = (
+              content[:pos]
+              + "\n"
+              + insertion
+              + content[pos:]
+          )
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(content)
+          PYEOF
+
+          touch "$PROPERTIES"
+
+          if grep -q \
+            '^android.packagingOptions.jniLibs.useLegacyPackaging=' \
+            "$PROPERTIES"; then
+
+            sed -i \
+              's/^android\.packagingOptions\.jniLibs\.useLegacyPackaging=.*/android.packagingOptions.jniLibs.useLegacyPackaging=true/' \
+              "$PROPERTIES"
+
+          else
+
+            printf \
+              '\nandroid.packagingOptions.jniLibs.useLegacyPackaging=true\n' \
+              >> "$PROPERTIES"
+
+          fi
+
+          python3 - "$MANIFEST" <<'PYEOF'
+          import sys
+          import re
+
+          path = sys.argv[1]
+
+          with open(path, encoding="utf-8") as f:
+              content = f.read()
+
+          if re.search(
+              r'android:extractNativeLibs\s*=',
+              content
+          ):
+              content = re.sub(
+                  r'android:extractNativeLibs\s*=\s*"[^"]*"',
+                  'android:extractNativeLibs="true"',
+                  content,
+                  count=1
+              )
+          else:
+              app_match = re.search(
+                  r'<application\b',
+                  content
+              )
+
+              if not app_match:
+                  raise SystemExit(
+                      "Could not find <application> in AndroidManifest.xml"
+                  )
+
+              pos = app_match.end()
+
+              content = (
+                  content[:pos]
+                  + '\n        android:extractNativeLibs="true"'
+                  + content[pos:]
+              )
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(content)
+          PYEOF
+
+          echo
+          echo "===== Native packaging configuration ====="
+
+          grep -n -A8 -B2 \
+            "packaging" \
+            "$GRADLE_FILE" || true
+
+          grep -n \
+            "useLegacyPackaging" \
+            "$PROPERTIES" || true
+
+          grep -n \
+            "extractNativeLibs" \
+            "$MANIFEST" || true
 
       # ============================================================
       # 5. JAVA
@@ -266,14 +406,31 @@ jobs:
           echo "NDK=$NDK"
           echo "TOOLCHAIN=$TOOLCHAIN"
 
-          test -x "$TOOLCHAIN/aarch64-linux-android35-clang"
-          test -x "$TOOLCHAIN/aarch64-linux-android35-clang++"
+          test -x \
+            "$TOOLCHAIN/aarch64-linux-android35-clang"
 
-          echo "CC=$TOOLCHAIN/aarch64-linux-android35-clang" >> "$GITHUB_ENV"
-          echo "CXX=$TOOLCHAIN/aarch64-linux-android35-clang++" >> "$GITHUB_ENV"
-          echo "AR=$TOOLCHAIN/llvm-ar" >> "$GITHUB_ENV"
-          echo "RANLIB=$TOOLCHAIN/llvm-ranlib" >> "$GITHUB_ENV"
-          echo "STRIP=$TOOLCHAIN/llvm-strip" >> "$GITHUB_ENV"
+          test -x \
+            "$TOOLCHAIN/aarch64-linux-android35-clang++"
+
+          echo \
+            "CC=$TOOLCHAIN/aarch64-linux-android35-clang" \
+            >> "$GITHUB_ENV"
+
+          echo \
+            "CXX=$TOOLCHAIN/aarch64-linux-android35-clang++" \
+            >> "$GITHUB_ENV"
+
+          echo \
+            "AR=$TOOLCHAIN/llvm-ar" \
+            >> "$GITHUB_ENV"
+
+          echo \
+            "RANLIB=$TOOLCHAIN/llvm-ranlib" \
+            >> "$GITHUB_ENV"
+
+          echo \
+            "STRIP=$TOOLCHAIN/llvm-strip" \
+            >> "$GITHUB_ENV"
 
           echo "$TOOLCHAIN" >> "$GITHUB_PATH"
 
@@ -325,7 +482,8 @@ jobs:
             https://github.com/microsoft/vcpkg.git \
             "$HOME/vcpkg"
 
-          "$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          "$HOME/vcpkg/bootstrap-vcpkg.sh" \
+            -disableMetrics
 
           echo "VCPKG_ROOT=$HOME/vcpkg" >> "$GITHUB_ENV"
 
@@ -360,10 +518,15 @@ jobs:
 
           VCPKG_INSTALLED="$VCPKG_ROOT/installed/$VCPKG_TRIPLET"
 
-          test -d "$VCPKG_INSTALLED/include/boost"
-          test -f "$VCPKG_INSTALLED/include/sodium.h"
+          test -d \
+            "$VCPKG_INSTALLED/include/boost"
 
-          echo "VCPKG_INSTALLED=$VCPKG_INSTALLED" >> "$GITHUB_ENV"
+          test -f \
+            "$VCPKG_INSTALLED/include/sodium.h"
+
+          echo \
+            "VCPKG_INSTALLED=$VCPKG_INSTALLED" \
+            >> "$GITHUB_ENV"
 
       # ============================================================
       # 15. BUILD REAL YCASHD
@@ -374,24 +537,35 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Starting Android ARM64 ycashd build..."
+          echo \
+            "Starting Android ARM64 ycashd build..."
 
-          find . -name "*.sh" -exec chmod +x {} +
+          find . \
+            -name "*.sh" \
+            -exec chmod +x {} +
 
           rustup show
-          rustup target add aarch64-linux-android
+
+          rustup target add \
+            aarch64-linux-android
 
           if [ -x ./autogen.sh ]; then
             ./autogen.sh
           fi
 
-          export PKG_CONFIG_LIBDIR="$VCPKG_INSTALLED/lib/pkgconfig"
+          export \
+            PKG_CONFIG_LIBDIR="$VCPKG_INSTALLED/lib/pkgconfig"
+
           unset PKG_CONFIG_PATH || true
 
-          export CPPFLAGS="-I$VCPKG_INSTALLED/include"
+          export \
+            CPPFLAGS="-I$VCPKG_INSTALLED/include"
 
-          export CXXFLAGS="${CXXFLAGS:-} -stdlib=libc++"
-          export LDFLAGS="-L$VCPKG_INSTALLED/lib -stdlib=libc++ -fPIE -pie -llog"
+          export \
+            CXXFLAGS="${CXXFLAGS:-} -stdlib=libc++"
+
+          export \
+            LDFLAGS="-L$VCPKG_INSTALLED/lib -stdlib=libc++ -fPIE -pie -llog"
 
           ./configure \
             --host=aarch64-linux-android \
@@ -424,7 +598,8 @@ jobs:
           )"
 
           if [ -z "$BIN" ]; then
-            echo "::error::Android ARM64 ycashd binary was not produced."
+            echo \
+              "::error::Android ARM64 ycashd binary was not produced."
 
             find "$YDIR" \
               -type f \
@@ -455,44 +630,73 @@ jobs:
 
           mkdir -p "$JNI_DIR"
 
-          rm -f "$JNI_DIR/libycashd.so"
+          rm -f \
+            "$JNI_DIR/libycashd.so"
 
-          cp "$BIN" "$JNI_DIR/libycashd.so"
+          cp \
+            "$BIN" \
+            "$JNI_DIR/libycashd.so"
 
           echo "===== Size before stripping ====="
-          ls -lh "$JNI_DIR/libycashd.so"
+
+          ls -lh \
+            "$JNI_DIR/libycashd.so"
 
           if [ -x "${STRIP:-}" ]; then
-            "$STRIP" --strip-unneeded "$JNI_DIR/libycashd.so"
+
+            "$STRIP" \
+              --strip-unneeded \
+              "$JNI_DIR/libycashd.so"
+
             echo "===== Size after stripping ====="
-            ls -lh "$JNI_DIR/libycashd.so"
+
+            ls -lh \
+              "$JNI_DIR/libycashd.so"
+
           else
-            echo "::warning::llvm-strip not found; shipping unstripped binary."
+
+            echo \
+              "::warning::llvm-strip not found; shipping unstripped binary."
+
           fi
 
-          chmod 755 "$JNI_DIR/libycashd.so"
+          chmod 755 \
+            "$JNI_DIR/libycashd.so"
 
           echo "===== Packaged daemon ====="
 
-          ls -lh "$JNI_DIR/libycashd.so"
+          ls -lh \
+            "$JNI_DIR/libycashd.so"
 
-          file "$JNI_DIR/libycashd.so"
+          file \
+            "$JNI_DIR/libycashd.so"
 
           ASSETS="$PROJECT/app/src/main/assets"
+
           mkdir -p "$ASSETS"
 
           {
-            echo "sha256=$(sha256sum "$JNI_DIR/libycashd.so" | cut -d' ' -f1)"
-            echo "bytes=$(stat -c%s "$JNI_DIR/libycashd.so")"
-            echo "run=${GITHUB_RUN_NUMBER:-local}"
-            echo "built=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo \
+              "sha256=$(sha256sum "$JNI_DIR/libycashd.so" | cut -d' ' -f1)"
+
+            echo \
+              "bytes=$(stat -c%s "$JNI_DIR/libycashd.so")"
+
+            echo \
+              "run=${GITHUB_RUN_NUMBER:-local}"
+
+            echo \
+              "built=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
           } > "$ASSETS/ycashd-build.txt"
 
           echo "===== Build fingerprint ====="
-          cat "$ASSETS/ycashd-build.txt"
+
+          cat \
+            "$ASSETS/ycashd-build.txt"
 
       # ============================================================
-      # 17b. SHIP THE C++ RUNTIME ALONGSIDE YCASHD
+      # 17b. SHIP THE C++ RUNTIME
       # ============================================================
       - name: Package libc++_shared.so
         shell: bash
@@ -500,20 +704,26 @@ jobs:
           set -euo pipefail
 
           PROJECT="${{ steps.locate.outputs.project_dir }}"
+
           JNI_DIR="$PROJECT/app/src/main/jniLibs/arm64-v8a"
 
           NDK="$ANDROID_NDK_HOME"
 
-          LIBCXX="$(find "$NDK/toolchains/llvm/prebuilt/linux-x86_64" \
-            -type f \
-            -name 'libc++_shared.so' \
-            -path '*aarch64-linux-android*' \
-            -print -quit || true)"
+          LIBCXX="$(
+            find "$NDK/toolchains/llvm/prebuilt/linux-x86_64" \
+              -type f \
+              -name 'libc++_shared.so' \
+              -path '*aarch64-linux-android*' \
+              -print -quit || true
+          )"
 
           if [ -z "$LIBCXX" ] || [ ! -f "$LIBCXX" ]; then
-            echo "::error::libc++_shared.so was not found in the selected NDK."
 
-            find "$NDK/toolchains/llvm/prebuilt/linux-x86_64" \
+            echo \
+              "::error::libc++_shared.so was not found in the selected NDK."
+
+            find \
+              "$NDK/toolchains/llvm/prebuilt/linux-x86_64" \
               -type f \
               -name 'libc++_shared.so' \
               -print || true
@@ -523,18 +733,26 @@ jobs:
 
           mkdir -p "$JNI_DIR"
 
-          rm -f "$JNI_DIR/libc++_shared.so"
+          rm -f \
+            "$JNI_DIR/libc++_shared.so"
 
-          cp "$LIBCXX" "$JNI_DIR/libc++_shared.so"
+          cp \
+            "$LIBCXX" \
+            "$JNI_DIR/libc++_shared.so"
 
-          chmod 755 "$JNI_DIR/libc++_shared.so"
+          chmod 755 \
+            "$JNI_DIR/libc++_shared.so"
 
           echo "===== libc++_shared.so ====="
-          ls -lh "$JNI_DIR/libc++_shared.so"
-          file "$JNI_DIR/libc++_shared.so"
+
+          ls -lh \
+            "$JNI_DIR/libc++_shared.so"
+
+          file \
+            "$JNI_DIR/libc++_shared.so"
 
       # ============================================================
-      # 17c. CONFIRM EVERY SHARED DEPENDENCY IS SATISFIED
+      # 17c. VERIFY SHARED DEPENDENCIES
       # ============================================================
       - name: Verify shared library dependencies
         shell: bash
@@ -551,50 +769,76 @@ jobs:
 
           echo "===== ycashd DT_NEEDED ====="
 
-          "$READELF" -d "$JNI_DIR/libycashd.so" | grep NEEDED || true
+          "$READELF" \
+            -d "$JNI_DIR/libycashd.so" \
+            | grep NEEDED || true
 
-          if ! "$READELF" -d "$JNI_DIR/libycashd.so" | grep -q 'libc++_shared.so'; then
-            echo "::error::ycashd does not declare libc++_shared.so in DT_NEEDED."
-            echo "The binary was not linked with the intended shared NDK libc++."
+          if ! "$READELF" \
+            -d "$JNI_DIR/libycashd.so" \
+            | grep -q 'libc++_shared.so'; then
+
+            echo \
+              "::error::ycashd does not declare libc++_shared.so in DT_NEEDED."
+
+            echo \
+              "The binary was not linked with the intended shared NDK libc++."
+
             exit 1
           fi
 
-          test -s "$JNI_DIR/libc++_shared.so"
+          test -s \
+            "$JNI_DIR/libc++_shared.so"
 
-          echo "libc++_shared.so is staged beside ycashd."
+          echo \
+            "libc++_shared.so is staged beside ycashd."
 
           PLATFORM="libc.so libm.so libdl.so liblog.so libz.so"
 
           MISSING=0
 
           while read -r NEED; do
+
             [ -z "$NEED" ] && continue
 
             if echo "$PLATFORM" | grep -qw "$NEED"; then
-              echo "  $NEED -- provided by Android"
+
+              echo \
+                "  $NEED -- provided by Android"
 
             elif [ -f "$JNI_DIR/$NEED" ]; then
-              echo "  $NEED -- shipped in jniLibs"
+
+              echo \
+                "  $NEED -- shipped in jniLibs"
 
             else
-              echo "::error::$NEED is required but neither provided by Android nor shipped."
+
+              echo \
+                "::error::$NEED is required but neither provided by Android nor shipped."
 
               MISSING=1
+
             fi
 
           done < <(
-            "$READELF" -d "$JNI_DIR/libycashd.so" |
+            "$READELF" \
+              -d "$JNI_DIR/libycashd.so" |
             grep NEEDED |
             sed -E 's/.*\[(.*)\].*/\1/'
           )
 
           if [ "$MISSING" -ne 0 ]; then
-            echo "Contents of $JNI_DIR:"
-            ls -lh "$JNI_DIR"
+
+            echo \
+              "Contents of $JNI_DIR:"
+
+            ls -lh \
+              "$JNI_DIR"
+
             exit 1
           fi
 
-          echo "All ycashd shared dependencies are satisfied."
+          echo \
+            "All ycashd shared dependencies are satisfied."
 
       # ============================================================
       # 18. VERIFY PACKAGED YCASHD
@@ -616,7 +860,9 @@ jobs:
           file "$DAEMON"
 
           if ! file "$DAEMON" | grep -q "pie executable"; then
-            echo "::error::ycashd is not a PIE executable; Android will refuse to run it."
+            echo \
+              "::error::ycashd is not a PIE executable; Android will refuse to run it."
+
             exit 1
           fi
 
@@ -635,18 +881,42 @@ jobs:
 
           MANIFEST="app/src/main/AndroidManifest.xml"
           GRADLE_FILE="app/build.gradle.kts"
+          PROPERTIES="gradle.properties"
 
-          if ! grep -q 'android:extractNativeLibs="true"' "$MANIFEST"; then
-            echo "::error::extractNativeLibs is not true; ycashd will not be extracted to disk."
+          echo \
+            "===== Checking native packaging configuration ====="
+
+          if ! grep -q \
+            'android:extractNativeLibs="true"' \
+            "$MANIFEST"; then
+
+            echo \
+              "::error::extractNativeLibs is not true."
+
             exit 1
           fi
 
-          if ! grep -q 'useLegacyPackaging = true' "$GRADLE_FILE"; then
-            echo "::error::jniLibs.useLegacyPackaging is not true; ycashd will be stored compressed."
+          if ! grep -q \
+            'useLegacyPackaging = true' \
+            "$GRADLE_FILE" && \
+             ! grep -q \
+            '^android.packagingOptions.jniLibs.useLegacyPackaging=true' \
+            "$PROPERTIES"; then
+
+            echo \
+              "::error::Native library legacy packaging is not enabled."
+
             exit 1
           fi
 
-          echo "Native library packaging is correct."
+          echo \
+            "extractNativeLibs=true"
+
+          echo \
+            "useLegacyPackaging=true"
+
+          echo \
+            "Native library packaging configuration is correct."
 
       # ============================================================
       # 20. PREPARE GRADLE
@@ -658,10 +928,14 @@ jobs:
           set -euo pipefail
 
           if [ ! -f gradlew ]; then
-            echo "Gradle wrapper not present; generating one."
+
+            echo \
+              "Gradle wrapper not present; generating one."
 
             if ! command -v gradle >/dev/null 2>&1; then
-              echo "Installing Gradle locally..."
+
+              echo \
+                "Installing Gradle locally..."
 
               GRADLE_VERSION="8.7"
 
@@ -669,13 +943,15 @@ jobs:
                 "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
                 -o "$RUNNER_TEMP/gradle.zip"
 
-              rm -rf "$RUNNER_TEMP/gradle"
+              rm -rf \
+                "$RUNNER_TEMP/gradle"
 
               unzip -q \
                 "$RUNNER_TEMP/gradle.zip" \
                 -d "$RUNNER_TEMP"
 
-              export PATH="$RUNNER_TEMP/gradle/gradle-${GRADLE_VERSION}/bin:$PATH"
+              export \
+                PATH="$RUNNER_TEMP/gradle/gradle-${GRADLE_VERSION}/bin:$PATH"
             fi
 
             gradle wrapper \
@@ -684,7 +960,9 @@ jobs:
 
           chmod +x gradlew
 
-          echo "Gradle wrapper:"
+          echo \
+            "Gradle wrapper:"
+
           ./gradlew --version
 
       # ============================================================
@@ -710,13 +988,18 @@ jobs:
             -keyalg RSA \
             -keysize 2048 \
             -validity 3650 \
-            -dname "CN=Ycash Temporary Build, OU=Development, O=Ycash, L=Local, ST=Local, C=GB"
+            -dname \
+            "CN=Ycash Temporary Build, OU=Development, O=Ycash, L=Local, ST=Local, C=GB"
 
-          chmod 600 "$KEYSTORE"
+          chmod 600 \
+            "$KEYSTORE"
 
-          echo "KEYSTORE=$KEYSTORE" >> "$GITHUB_ENV"
+          echo \
+            "KEYSTORE=$KEYSTORE" \
+            >> "$GITHUB_ENV"
 
-          echo "Temporary CI signing key generated."
+          echo \
+            "Temporary CI signing key generated."
 
       # ============================================================
       # 22. BUILD RELEASE APK
@@ -735,13 +1018,15 @@ jobs:
 
           echo "===== Release APKs ====="
 
-          find "$PWD/app/build/outputs/apk" \
+          find \
+            "$PWD/app/build/outputs/apk" \
             -type f \
             -name '*.apk' \
             -print
 
           APK="$(
-            find "$PWD/app/build/outputs/apk" \
+            find \
+              "$PWD/app/build/outputs/apk" \
               -type f \
               -name '*.apk' \
               -print -quit
@@ -749,25 +1034,43 @@ jobs:
 
           test -n "$APK"
 
-          echo "===== PRE-SIGN NATIVE RUNTIME CHECK ====="
+          echo \
+            "===== PRE-SIGN NATIVE RUNTIME CHECK ====="
 
-          if ! unzip -l "$APK" | grep -q 'lib/arm64-v8a/libycashd.so'; then
-            echo "::error::libycashd.so is missing from the unsigned APK."
-            unzip -l "$APK" | grep 'lib/' || true
+          if ! unzip -l "$APK" |
+            grep -q \
+            'lib/arm64-v8a/libycashd.so'; then
+
+            echo \
+              "::error::libycashd.so is missing from the unsigned APK."
+
+            unzip -l "$APK" |
+              grep 'lib/' || true
+
             exit 1
           fi
 
-          if ! unzip -l "$APK" | grep -q 'lib/arm64-v8a/libc++_shared.so'; then
-            echo "::error::libc++_shared.so is missing from the unsigned APK."
-            echo "The CI staging directory contained it, but Gradle did not package it."
-            unzip -l "$APK" | grep 'lib/' || true
+          if ! unzip -l "$APK" |
+            grep -q \
+            'lib/arm64-v8a/libc++_shared.so'; then
+
+            echo \
+              "::error::libc++_shared.so is missing from the unsigned APK."
+
+            echo \
+              "The CI staging directory contained it, but Gradle did not package it."
+
+            unzip -l "$APK" |
+              grep 'lib/' || true
+
             exit 1
           fi
 
-          echo "Both ARM64 native libraries are present in the APK."
+          echo \
+            "Both ARM64 native libraries are present in the APK."
 
       # ============================================================
-      # 23. LOCATE APK AND CONVERT TO ABSOLUTE PATH
+      # 23. LOCATE APK
       # ============================================================
       - name: Locate unsigned APK
         id: unsigned_apk
@@ -777,16 +1080,20 @@ jobs:
           set -euo pipefail
 
           APK="$(
-            find "$PWD/app/build/outputs/apk" \
+            find \
+              "$PWD/app/build/outputs/apk" \
               -type f \
               -name '*.apk' \
               -print -quit
           )"
 
           if [ -z "$APK" ]; then
-            echo "::error::No APK was produced."
 
-            find "$PWD/app/build" \
+            echo \
+              "::error::No APK was produced."
+
+            find \
+              "$PWD/app/build" \
               -type f \
               | sort \
               | head -300
@@ -796,13 +1103,18 @@ jobs:
 
           APK="$(realpath "$APK")"
 
-          echo "Unsigned APK:"
+          echo \
+            "Unsigned APK:"
+
           echo "$APK"
 
           file "$APK"
+
           ls -lh "$APK"
 
-          echo "apk=$APK" >> "$GITHUB_OUTPUT"
+          echo \
+            "apk=$APK" \
+            >> "$GITHUB_OUTPUT"
 
       # ============================================================
       # 24. ZIPALIGN
@@ -816,6 +1128,7 @@ jobs:
           INPUT="${{ steps.unsigned_apk.outputs.apk }}"
 
           BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
+
           ZIPALIGN="$BUILD_TOOLS/zipalign"
 
           ALIGNED="$RUNNER_TEMP/YcashNode-Android-ARM64-aligned.apk"
@@ -837,10 +1150,14 @@ jobs:
 
           test -f "$ALIGNED"
 
-          echo "Aligned APK:"
+          echo \
+            "Aligned APK:"
+
           ls -lh "$ALIGNED"
 
-          echo "apk=$ALIGNED" >> "$GITHUB_OUTPUT"
+          echo \
+            "apk=$ALIGNED" \
+            >> "$GITHUB_OUTPUT"
 
       # ============================================================
       # 25. SIGN FINAL APK
@@ -854,6 +1171,7 @@ jobs:
           INPUT="${{ steps.aligned.outputs.apk }}"
 
           BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
+
           APKSIGNER="$BUILD_TOOLS/apksigner"
 
           SIGNED="$RUNNER_TEMP/YcashNode-Android-ARM64-SIGNED.apk"
@@ -878,10 +1196,14 @@ jobs:
 
           test -f "$SIGNED"
 
-          echo "Signed APK:"
+          echo \
+            "Signed APK:"
+
           ls -lh "$SIGNED"
 
-          echo "apk=$SIGNED" >> "$GITHUB_OUTPUT"
+          echo \
+            "apk=$SIGNED" \
+            >> "$GITHUB_OUTPUT"
 
       # ============================================================
       # 26. VERIFY APK SIGNATURE
@@ -894,32 +1216,24 @@ jobs:
           APK="${{ steps.signed.outputs.apk }}"
 
           BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
+
           APKSIGNER="$BUILD_TOOLS/apksigner"
 
           test -f "$APK"
           test -x "$APKSIGNER"
 
-          echo "===== APK SIGNATURE VERIFICATION ====="
+          echo \
+            "===== APK SIGNATURE VERIFICATION ====="
 
           "$APKSIGNER" verify \
             --verbose \
             "$APK"
 
-          echo "===== APK VERIFIED ====="
+          echo \
+            "===== APK VERIFIED ====="
 
       # ============================================================
       # 27. VERIFY APK ZIP ALIGNMENT
-      #
-      # IMPORTANT:
-      # Use lowercase -p here. The previous workflow used:
-      #
-      #   zipalign -c -P 4 "$APK"
-      #
-      # Uppercase -P consumes the 4 as a page-size argument and leaves
-      # the command with an invalid argument layout.
-      #
-      # This workflow uses the same lowercase -p flag used when the APK
-      # was aligned in step 24.
       # ============================================================
       - name: Verify APK alignment
         shell: bash
@@ -929,6 +1243,7 @@ jobs:
           APK="${{ steps.signed.outputs.apk }}"
 
           BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
+
           ZIPALIGN="$BUILD_TOOLS/zipalign"
 
           test -f "$APK"
@@ -940,7 +1255,8 @@ jobs:
             4 \
             "$APK"
 
-          echo "APK alignment verified."
+          echo \
+            "APK alignment verified."
 
       # ============================================================
       # 28. FINAL APK INSPECTION
@@ -954,9 +1270,14 @@ jobs:
 
           test -f "$APK"
 
-          echo "=========================================="
-          echo "FINAL Ycash NODE APK"
-          echo "=========================================="
+          echo \
+            "=========================================="
+
+          echo \
+            "FINAL Ycash NODE APK"
+
+          echo \
+            "=========================================="
 
           ls -lh "$APK"
 
@@ -972,54 +1293,107 @@ jobs:
           echo
           echo "APK contents:"
 
-          unzip -l "$APK" \
-            | grep -E \
+          unzip -l "$APK" |
+            grep -E \
               'lib/arm64-v8a|AndroidManifest.xml' \
             | head -100
 
           echo
-          echo "Native library compression (Stored = extractable):"
+          echo \
+            "Native library compression:"
 
-          unzip -v "$APK" \
-            | grep -E "libycashd.so|libc\+\+_shared.so" || true
+          unzip -lv "$APK" |
+            grep -E \
+              'libycashd\.so|libc\+\+_shared\.so' \
+            || true
 
-          if ! unzip -l "$APK" | grep -q "lib/arm64-v8a/libycashd.so"; then
-            echo "::error::libycashd.so is missing from the APK."
-            unzip -l "$APK" | grep "lib/" || true
+          if ! unzip -l "$APK" |
+            grep -q \
+            "lib/arm64-v8a/libycashd.so"; then
+
+            echo \
+              "::error::libycashd.so is missing from the APK."
+
+            unzip -l "$APK" |
+              grep "lib/" || true
+
             exit 1
           fi
 
-          echo "libycashd.so is present in the APK."
+          echo \
+            "libycashd.so is present in the APK."
 
-          if ! unzip -l "$APK" | grep -q "lib/arm64-v8a/libc++_shared.so"; then
-            echo "::error::libc++_shared.so is missing from the final APK."
+          if ! unzip -l "$APK" |
+            grep -q \
+            "lib/arm64-v8a/libc++_shared.so"; then
+
+            echo \
+              "::error::libc++_shared.so is missing from the final APK."
+
             exit 1
           fi
 
-          echo "libc++_shared.so is present in the final APK."
+          echo \
+            "libc++_shared.so is present in the final APK."
 
           echo
-          echo "===== Native library entries ====="
+          echo \
+            "===== Native library entries ====="
 
-          unzip -l "$APK" |
+          unzip -lv "$APK" |
             grep -E \
               'lib/arm64-v8a/(libycashd\.so|libc\+\+_shared\.so)$'
 
-          for NAME in libycashd.so libc++_shared.so; do
-            if ! unzip -v "$APK" |
-              grep -E "lib/arm64-v8a/${NAME}$" |
-              grep -q '^[[:space:]]*[0-9].* Stored '; then
+          check_uncompressed() {
+            local NAME="$1"
 
-              echo "::error::$NAME is not stored uncompressed in the APK."
+            echo
+            echo \
+              "Checking $NAME..."
 
-              unzip -v "$APK" |
-                grep "lib/arm64-v8a/${NAME}" || true
+            ENTRY="$(
+              unzip -lv "$APK" |
+              grep -E \
+                "lib/arm64-v8a/${NAME}$" |
+              head -1 || true
+            )"
+
+            if [ -z "$ENTRY" ]; then
+
+              echo \
+                "::error::$NAME was not found in the APK."
 
               exit 1
             fi
-          done
 
-          echo "Both native libraries are stored uncompressed and extractable."
+            echo "$ENTRY"
+
+            METHOD="$(echo "$ENTRY" | awk '{print $2}')"
+
+            if [ "$METHOD" != "Stored" ]; then
+
+              echo \
+                "::error::$NAME is compressed in the APK."
+
+              echo \
+                "Compression method: $METHOD"
+
+              exit 1
+            fi
+
+            echo \
+              "$NAME is STORED/uncompressed."
+          }
+
+          check_uncompressed \
+            "libycashd.so"
+
+          check_uncompressed \
+            "libc++_shared.so"
+
+          echo
+          echo \
+            "Both native libraries are stored uncompressed."
 
       # ============================================================
       # 29. COPY FINAL APK TO WORKSPACE
@@ -1041,7 +1415,9 @@ jobs:
 
           test -f "$OUT"
 
-          echo "Final artifact:"
+          echo \
+            "Final artifact:"
+
           ls -lh "$OUT"
 
       # ============================================================
@@ -1103,6 +1479,12 @@ jobs:
           Embedded in app nativeLibraryDir as libycashd.so
           Stripped for shipping; unstripped copy uploaded separately
 
+          libc++:
+          Embedded as libc++_shared.so
+
+          Native library packaging:
+          Uncompressed / extractable
+
           APK signature:
           Verified with apksigner
 
@@ -1110,7 +1492,8 @@ jobs:
           Verified with zipalign -c -p 4
           EOF
 
-          cat "$RUNNER_TEMP/ycash-build-info.txt"
+          cat \
+            "$RUNNER_TEMP/ycash-build-info.txt"
 
       # ============================================================
       # 33. UPLOAD BUILD INFORMATION
