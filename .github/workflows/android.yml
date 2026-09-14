@@ -272,24 +272,29 @@ jobs:
           echo "$LLVM"
 
           test -x "$LLVM/aarch64-linux-android${ANDROID_API}-clang"
-      test -x "$LLVM/llvm-ar"
+          test -x "$LLVM/llvm-ar"
 
-      mkdir -p .cargo
+          mkdir -p .cargo
 
-      cat > .cargo/config.toml <<EOF
-      [target.aarch64-linux-android]
-      linker = "$LLVM/aarch64-linux-android${ANDROID_API}-clang"
-      ar = "$LLVM/llvm-ar"
-      EOF
+          cat > .cargo/config.toml <<EOF
+          [target.aarch64-linux-android]
+          linker = "$LLVM/aarch64-linux-android${ANDROID_API}-clang"
+          ar = "$LLVM/llvm-ar"
+          EOF
 
-      echo
-      echo "Cargo Android linker configuration:"
-      cat .cargo/config.toml
+          echo
+          echo "Cargo Android linker configuration:"
+          cat .cargo/config.toml
 
-      echo "CC_aarch64_linux_android=$LLVM/aarch64-linux-android${ANDROID_API}-clang" >> "$GITHUB_ENV"
-      echo "CXX_aarch64_linux_android=$LLVM/aarch64-linux-android${ANDROID_API}-clang++" >> "$GITHUB_ENV"
-      echo "AR_aarch64_linux_android=$LLVM/llvm-ar" >> "$GITHUB_ENV"
-      echo "RANLIB_aarch64_linux_android=$LLVM/llvm-ranlib" >> "$GITHUB_ENV"
+          # cc-rs (used by build scripts such as libsqlite3-sys's
+          # "bundled" feature) does not read .cargo/config.toml's
+          # `linker` key — it looks for CC_*/AR_* env vars instead.
+          # Export the same compiler/archiver here so later cargo
+          # build steps can find them.
+          echo "CC_aarch64_linux_android=$LLVM/aarch64-linux-android${ANDROID_API}-clang" >> "$GITHUB_ENV"
+          echo "CXX_aarch64_linux_android=$LLVM/aarch64-linux-android${ANDROID_API}-clang++" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=$LLVM/llvm-ar" >> "$GITHUB_ENV"
+          echo "RANLIB_aarch64_linux_android=$LLVM/llvm-ranlib" >> "$GITHUB_ENV"
 
       # =========================================================
       # 8. VERIFY RUST WORKSPACE
