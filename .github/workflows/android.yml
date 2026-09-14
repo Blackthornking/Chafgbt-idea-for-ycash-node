@@ -13,6 +13,7 @@ env:
   ANDROID_API: "35"
   ANDROID_NDK: "27.2.12479018"
   RUST_TARGET: "aarch64-linux-android"
+  VCPKG_TRIPLET: "arm64-android"
 
 jobs:
   build:
@@ -187,8 +188,47 @@ jobs:
 
           echo "$TOOLCHAIN" >> "$GITHUB_PATH"
 
+          # Used by the vcpkg Android toolchain in the next steps.
+          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
+
       # ------------------------------------------------------------
-      # 10. Try native ycashd Android build
+      # 10. Set up vcpkg (used to cross-build Boost + libevent for
+      #     Android, since ycashd's own `depends` system has no
+      #     Android host profile).
+      # ------------------------------------------------------------
+      - name: Set up vcpkg
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git "$HOME/vcpkg"
+          "$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+
+          echo "VCPKG_ROOT=$HOME/vcpkg" >> "$GITHUB_ENV"
+
+      # ------------------------------------------------------------
+      # 11. Cross-build Boost + libevent for Android ARM64
+      # ------------------------------------------------------------
+      - name: Build Boost and libevent for Android ARM64 (vcpkg)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          "$VCPKG_ROOT/vcpkg" install \
+            boost-system boost-filesystem boost-program-options boost-thread boost-chrono \
+            libevent \
+            --triplet "$VCPKG_TRIPLET"
+
+          VCPKG_INSTALLED="$VCPKG_ROOT/installed/$VCPKG_TRIPLET"
+          test -d "$VCPKG_INSTALLED/include/boost"
+
+          echo "VCPKG_INSTALLED=$VCPKG_INSTALLED" >> "$GITHUB_ENV"
+
+          echo "===== vcpkg installed tree ====="
+          find "$VCPKG_INSTALLED/lib/pkgconfig" -maxdepth 1 -type f 2>/dev/null || true
+
+      # ------------------------------------------------------------
+      # 12. Try native ycashd Android build
       #
       # This intentionally builds the REAL daemon.
       # It does not substitute a mock/lightwallet client.
@@ -207,8 +247,14 @@ jobs:
             ./autogen.sh
           fi
 
+          # Point configure at the Boost/libevent that vcpkg cross-built
+          # for Android in the previous step, instead of the host's.
+          export PKG_CONFIG_LIBDIR="$VCPKG_INSTALLED/lib/pkgconfig"
+          unset PKG_CONFIG_PATH || true
+
           ./configure \
             --host=aarch64-linux-android \
+            --with-boost="$VCPKG_INSTALLED" \
             --disable-wallet \
             --disable-mining \
             --disable-tests \
@@ -217,7 +263,7 @@ jobs:
           make -j"$(nproc)"
 
       # ------------------------------------------------------------
-      # 11. Find resulting ycashd
+      # 13. Find resulting ycashd
       # ------------------------------------------------------------
       - name: Find ycashd binary
         id: binary
@@ -244,7 +290,7 @@ jobs:
           echo "binary=$BIN" >> "$GITHUB_OUTPUT"
 
       # ------------------------------------------------------------
-      # 12. Install daemon into Android assets
+      # 14. Install daemon into Android assets
       # ------------------------------------------------------------
       - name: Package ycashd into Android application
         shell: bash
@@ -265,7 +311,7 @@ jobs:
           file "$PROJECT/app/src/main/node-assets/ycashd"
 
       # ------------------------------------------------------------
-      # 13. Generate Gradle wrapper if necessary
+      # 15. Generate Gradle wrapper if necessary
       # ------------------------------------------------------------
       - name: Prepare Gradle
         working-directory: ${{ steps.locate.outputs.project_dir }}
@@ -283,7 +329,7 @@ jobs:
           chmod +x gradlew
 
       # ------------------------------------------------------------
-      # 14. Build APK
+      # 16. Build APK
       # ------------------------------------------------------------
       - name: Build release APK
         working-directory: ${{ steps.locate.outputs.project_dir }}
@@ -297,7 +343,7 @@ jobs:
             assembleRelease
 
       # ------------------------------------------------------------
-      # 15. Locate APK
+      # 17. Locate APK
       # ------------------------------------------------------------
       - name: Locate APK
         id: apk
@@ -318,7 +364,7 @@ jobs:
           echo "apk=$APK" >> "$GITHUB_OUTPUT"
 
       # ------------------------------------------------------------
-      # 16. Upload APK
+      # 18. Upload APK
       # ------------------------------------------------------------
       - name: Upload Android APK
         uses: actions/upload-artifact@v4
@@ -328,7 +374,7 @@ jobs:
           if-no-files-found: error
 
       # ------------------------------------------------------------
-      # 17. Upload daemon separately for debugging
+      # 19. Upload daemon separately for debugging
       # ------------------------------------------------------------
       - name: Upload ycashd ARM64 binary
         uses: actions/upload-artifact@v4
