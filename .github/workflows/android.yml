@@ -1,4 +1,4 @@
-name: Build Ycash Android Node
+name: Build Yortal Wallet
 
 on:
   workflow_dispatch:
@@ -10,329 +10,357 @@ permissions:
   contents: read
 
 env:
+  FLUTTER_VERSION: "3.35.2"
   ANDROID_API: "35"
+  ANDROID_BUILD_TOOLS: "35.0.0"
   ANDROID_NDK: "27.2.12479018"
-  RUST_TARGET: "aarch64-linux-android"
-  VCPKG_TRIPLET: "arm64-android"
+
+  CI_KEY_ALIAS: "yortal-ci"
+  CI_KEYSTORE_PASSWORD: "temporary123"
+  CI_KEY_PASSWORD: "temporary123"
 
 jobs:
   build:
-    name: Build Android ARM64 Ycash Node
+    name: Build Yortal Wallet Android
     runs-on: ubuntu-24.04
 
     steps:
-      # ------------------------------------------------------------
-      # 1. Get repository
-      # ------------------------------------------------------------
+
+      # ============================================================
+      # 1. CHECKOUT
+      # ============================================================
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ------------------------------------------------------------
-      # 2. Find and extract ZIP
-      # ------------------------------------------------------------
-      - name: Find project ZIP
-        id: find_zip
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ZIP="$(find . -maxdepth 1 -type f -iname '*.zip' | head -n 1)"
-
-          if [ -z "$ZIP" ]; then
-            echo "::error::No ZIP file found in repository root."
-            exit 1
-          fi
-
-          echo "Using ZIP: $ZIP"
-          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
-
-      - name: Extract ZIP
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          rm -rf extracted
-          mkdir -p extracted
-
-          unzip -q -o "${{ steps.find_zip.outputs.zip }}" -d extracted
-
-          echo "Extracted files:"
-          find extracted -maxdepth 3 -type f | sort | head -200
-
-      # ------------------------------------------------------------
-      # 3. Locate Android project
-      # ------------------------------------------------------------
-      - name: Locate Android project
-        id: locate
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          PROJECT="$(find extracted -name settings.gradle.kts -print -quit)"
-
-          if [ -z "$PROJECT" ]; then
-            echo "::error::Could not find settings.gradle.kts."
-            exit 1
-          fi
-
-          PROJECT_DIR="$(dirname "$PROJECT")"
-
-          echo "Android project: $PROJECT_DIR"
-          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
-
-      # ------------------------------------------------------------
-      # 4. Install Java
-      # ------------------------------------------------------------
-      - name: Set up Java
+      # ============================================================
+      # 2. JAVA 17
+      # ============================================================
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
-          cache: gradle
 
-      # ------------------------------------------------------------
-      # 5. Install Android SDK + NDK
-      # ------------------------------------------------------------
+      # ============================================================
+      # 3. FLUTTER
+      # ============================================================
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      # ============================================================
+      # 4. ANDROID SDK
+      # ============================================================
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK packages
+      - name: Install Android SDK and NDK
         shell: bash
         run: |
           set -euo pipefail
 
           sdkmanager "platform-tools"
           sdkmanager "platforms;android-${ANDROID_API}"
-          sdkmanager "build-tools;35.0.0"
+          sdkmanager "build-tools;${ANDROID_BUILD_TOOLS}"
           sdkmanager "ndk;${ANDROID_NDK}"
 
           yes | sdkmanager --licenses >/dev/null || true
 
-      # ------------------------------------------------------------
-      # 6. Install Rust
-      # ------------------------------------------------------------
-      - name: Install Rust
+      # ============================================================
+      # 5. RUST
+      # ============================================================
+      - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ env.RUST_TARGET }}
+          targets: |
+            aarch64-linux-android
+            armv7-linux-androideabi
+            x86_64-linux-android
 
-      # ------------------------------------------------------------
-      # 7. Locate ycashd source
-      # ------------------------------------------------------------
-      - name: Locate ycashd source
-        id: ycashd
+      # ============================================================
+      # 6. CARGO NDK
+      # ============================================================
+      - name: Install cargo-ndk
         shell: bash
         run: |
           set -euo pipefail
 
-          SOURCE="$(find extracted -type f -name configure.ac -path '*ycashd*' -print -quit || true)"
+          cargo install cargo-ndk --locked
 
-          if [ -z "$SOURCE" ]; then
-            SOURCE="$(find extracted -type f -name configure.ac -print -quit || true)"
-          fi
+          cargo ndk --version
 
-          if [ -z "$SOURCE" ]; then
-            echo "::error::Could not locate ycashd source."
-            exit 1
-          fi
-
-          YDIR="$(dirname "$SOURCE")"
-
-          echo "ycashd source: $YDIR"
-          echo "ycashd_dir=$YDIR" >> "$GITHUB_OUTPUT"
-
-      # ------------------------------------------------------------
-      # 8. Inspect source
-      # ------------------------------------------------------------
-      - name: Inspect source tree
+      # ============================================================
+      # 7. NATIVE BUILD DEPENDENCIES
+      # ============================================================
+      - name: Install native build dependencies
         shell: bash
         run: |
           set -euo pipefail
 
-          YDIR="${{ steps.ycashd.outputs.ycashd_dir }}"
+          sudo apt-get update
 
-          echo "===== ycashd ====="
-          ls -la "$YDIR"
+          sudo apt-get install -y \
+            protobuf-compiler \
+            clang \
+            cmake \
+            ninja-build \
+            pkg-config \
+            libssl-dev \
+            build-essential \
+            unzip \
+            curl
 
-          echo "===== configure ====="
-          test -f "$YDIR/configure.ac"
+          protoc --version
+          clang --version
+          cmake --version
 
-          echo "===== Makefile ====="
-          test -f "$YDIR/Makefile.am"
-
-          echo "===== Rust ====="
-          test -f "$YDIR/Cargo.toml" || true
-
-      # ------------------------------------------------------------
-      # 9. Configure Android toolchain
-      # ------------------------------------------------------------
-      - name: Configure Android ARM64 environment
+      # ============================================================
+      # 8. FLUTTER DEPENDENCIES
+      # ============================================================
+      - name: Flutter pub get
         shell: bash
         run: |
           set -euo pipefail
 
-          NDK="$ANDROID_HOME/ndk/$ANDROID_NDK"
+          flutter pub get
 
-          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
-
-          echo "NDK=$NDK"
-          echo "TOOLCHAIN=$TOOLCHAIN"
-
-          test -x "$TOOLCHAIN/aarch64-linux-android35-clang"
-          test -x "$TOOLCHAIN/aarch64-linux-android35-clang++"
-
-          echo "CC=$TOOLCHAIN/aarch64-linux-android35-clang" >> "$GITHUB_ENV"
-          echo "CXX=$TOOLCHAIN/aarch64-linux-android35-clang++" >> "$GITHUB_ENV"
-          echo "AR=$TOOLCHAIN/llvm-ar" >> "$GITHUB_ENV"
-          echo "RANLIB=$TOOLCHAIN/llvm-ranlib" >> "$GITHUB_ENV"
-
-          echo "$TOOLCHAIN" >> "$GITHUB_PATH"
-
-          # Used by the vcpkg Android toolchain in the next steps.
-          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
-
-      # ------------------------------------------------------------
-      # 10. Set up vcpkg (used to cross-build Boost + libevent for
-      #     Android, since ycashd's own `depends` system has no
-      #     Android host profile).
-      # ------------------------------------------------------------
-      - name: Set up vcpkg
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          git clone --depth 1 https://github.com/microsoft/vcpkg.git "$HOME/vcpkg"
-          "$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
-
-          echo "VCPKG_ROOT=$HOME/vcpkg" >> "$GITHUB_ENV"
-
-      # ------------------------------------------------------------
-      # 11. Cross-build Boost + libevent for Android ARM64
-      # ------------------------------------------------------------
-      - name: Build Boost and libevent for Android ARM64 (vcpkg)
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          "$VCPKG_ROOT/vcpkg" install \
-            boost-system boost-filesystem boost-program-options boost-thread boost-chrono \
-            libevent \
-            --triplet "$VCPKG_TRIPLET"
-
-          VCPKG_INSTALLED="$VCPKG_ROOT/installed/$VCPKG_TRIPLET"
-          test -d "$VCPKG_INSTALLED/include/boost"
-
-          echo "VCPKG_INSTALLED=$VCPKG_INSTALLED" >> "$GITHUB_ENV"
-
-          echo "===== vcpkg installed tree ====="
-          find "$VCPKG_INSTALLED/lib/pkgconfig" -maxdepth 1 -type f 2>/dev/null || true
-
-      # ------------------------------------------------------------
-      # 12. Try native ycashd Android build
+      # ============================================================
+      # 9. DOWNLOAD YCAST SAPLING PARAMETERS
       #
-      # This intentionally builds the REAL daemon.
-      # It does not substitute a mock/lightwallet client.
-      # ------------------------------------------------------------
-      - name: Build ycashd for Android ARM64
-        shell: bash
-        working-directory: ${{ steps.ycashd.outputs.ycashd_dir }}
-        run: |
-          set -euo pipefail
-
-          echo "Starting Android ARM64 ycashd build..."
-
-          chmod +x autogen.sh || true
-
-          if [ -x ./autogen.sh ]; then
-            ./autogen.sh
-          fi
-
-          # Point configure at the Boost/libevent that vcpkg cross-built
-          # for Android in the previous step, instead of the host's.
-          export PKG_CONFIG_LIBDIR="$VCPKG_INSTALLED/lib/pkgconfig"
-          unset PKG_CONFIG_PATH || true
-
-          ./configure \
-            --host=aarch64-linux-android \
-            --with-boost="$VCPKG_INSTALLED" \
-            --disable-wallet \
-            --disable-mining \
-            --disable-tests \
-            --disable-bench
-
-          make -j"$(nproc)"
-
-      # ------------------------------------------------------------
-      # 13. Find resulting ycashd
-      # ------------------------------------------------------------
-      - name: Find ycashd binary
-        id: binary
+      # USER-SUPPLIED / CORRECTED MAPPING
+      #
+      # Spend:
+      # 1T02YAgRo3Rx6ksXphGuDKadkV5K49RW2
+      #
+      # Output:
+      # 1OfbiqE2uzdJqxFfC8s8h0l_s4KT8_Io6
+      #
+      # These are downloaded at build time and are not committed
+      # into the repository.
+      # ============================================================
+      - name: Download Ycash Sapling parameters
         shell: bash
         run: |
           set -euo pipefail
 
-          YDIR="${{ steps.ycashd.outputs.ycashd_dir }}"
+          PARAM_DIR="packages/ycash_core_ffi/rust/vendor/yecshell-lib/zcash-params"
 
-          BIN="$(find "$YDIR" -type f \
-            \( -name ycashd -o -name ycashd.exe \) \
-            -perm -111 \
-            -print -quit || true)"
+          mkdir -p "$PARAM_DIR"
 
-          if [ -z "$BIN" ]; then
-            echo "::error::Android ARM64 ycashd binary was not produced."
-            echo "Searching build tree:"
-            find "$YDIR" -type f -perm -111 | head -100
+          SPEND_ID="1T02YAgRo3Rx6ksXphGuDKadkV5K49RW2"
+          OUTPUT_ID="1OfbiqE2uzdJqxFfC8s8h0l_s4KT8_Io6"
+
+          SPEND_URL="https://drive.google.com/uc?export=download&id=${SPEND_ID}"
+          OUTPUT_URL="https://drive.google.com/uc?export=download&id=${OUTPUT_ID}"
+
+          echo "=========================================="
+          echo "Downloading Sapling spend parameters"
+          echo "=========================================="
+
+          curl \
+            --fail \
+            --location \
+            --retry 5 \
+            --retry-delay 3 \
+            --silent \
+            --show-error \
+            "$SPEND_URL" \
+            --output "$PARAM_DIR/sapling-spend.params"
+
+          echo "=========================================="
+          echo "Downloading Sapling output parameters"
+          echo "=========================================="
+
+          curl \
+            --fail \
+            --location \
+            --retry 5 \
+            --retry-delay 3 \
+            --silent \
+            --show-error \
+            "$OUTPUT_URL" \
+            --output "$PARAM_DIR/sapling-output.params"
+
+          echo "=========================================="
+          echo "Checking parameter files"
+          echo "=========================================="
+
+          test -s "$PARAM_DIR/sapling-spend.params"
+          test -s "$PARAM_DIR/sapling-output.params"
+
+          echo "Spend parameter:"
+          ls -lh "$PARAM_DIR/sapling-spend.params"
+
+          echo "Output parameter:"
+          ls -lh "$PARAM_DIR/sapling-output.params"
+
+      # ============================================================
+      # 10. VERIFY SAPLING PARAMETERS
+      # ============================================================
+      - name: Verify Ycash Sapling parameters
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PARAM_DIR="packages/ycash_core_ffi/rust/vendor/yecshell-lib/zcash-params"
+
+          SPEND="$PARAM_DIR/sapling-spend.params"
+          OUTPUT="$PARAM_DIR/sapling-output.params"
+
+          test -f "$SPEND"
+          test -f "$OUTPUT"
+
+          test -s "$SPEND"
+          test -s "$OUTPUT"
+
+          SPEND_SIZE="$(stat -c%s "$SPEND")"
+          OUTPUT_SIZE="$(stat -c%s "$OUTPUT")"
+
+          echo "Sapling spend parameter size: ${SPEND_SIZE} bytes"
+          echo "Sapling output parameter size: ${OUTPUT_SIZE} bytes"
+
+          if [ "$SPEND_SIZE" -lt 1000000 ]; then
+            echo "::error::Sapling spend parameter appears too small."
             exit 1
           fi
 
-          file "$BIN"
+          if [ "$OUTPUT_SIZE" -lt 1000000 ]; then
+            echo "::error::Sapling output parameter appears too small."
+            exit 1
+          fi
 
-          echo "binary=$BIN" >> "$GITHUB_OUTPUT"
+          echo "Sapling parameter files passed basic validation."
 
-      # ------------------------------------------------------------
-      # 14. Install daemon into Android assets
-      # ------------------------------------------------------------
-      - name: Package ycashd into Android application
+      # ============================================================
+      # 11. RUST CORE TESTS
+      # ============================================================
+      - name: Test Ycash Rust core
+        working-directory: packages/ycash_core_ffi/rust
         shell: bash
         run: |
           set -euo pipefail
 
-          PROJECT="${{ steps.locate.outputs.project_dir }}"
-          BIN="${{ steps.binary.outputs.binary }}"
+          cargo test --all-targets
 
-          mkdir -p "$PROJECT/app/src/main/node-assets"
+      # ============================================================
+      # 12. FLUTTER TESTS
+      # ============================================================
+      - name: Run Flutter tests
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          cp "$BIN" "$PROJECT/app/src/main/node-assets/ycashd"
-          chmod 755 "$PROJECT/app/src/main/node-assets/ycashd"
+          flutter test
 
-          echo "Packaged daemon:"
-          ls -lh "$PROJECT/app/src/main/node-assets/ycashd"
+      # ============================================================
+      # 13. VERIFY ANDROID PROJECT
+      # ============================================================
+      - name: Inspect Android project
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          file "$PROJECT/app/src/main/node-assets/ycashd"
+          test -d android
+          test -f android/settings.gradle
+          test -f android/app/build.gradle
 
-      # ------------------------------------------------------------
-      # 15. Generate Gradle wrapper if necessary
-      # ------------------------------------------------------------
+          echo "Android project detected."
+
+      # ============================================================
+      # 14. BUILD NATIVE CORE - ARM64
+      # ============================================================
+      - name: Build Ycash native core ARM64
+        working-directory: packages/ycash_core_ffi/rust
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cargo ndk \
+            -t arm64-v8a \
+            -o ../../../../android/app/src/main/jniLibs \
+            build --release
+
+      # ============================================================
+      # 15. BUILD NATIVE CORE - ARMv7
+      # ============================================================
+      - name: Build Ycash native core ARMv7
+        working-directory: packages/ycash_core_ffi/rust
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cargo ndk \
+            -t armeabi-v7a \
+            -o ../../../../android/app/src/main/jniLibs \
+            build --release
+
+      # ============================================================
+      # 16. BUILD NATIVE CORE - x86_64
+      # ============================================================
+      - name: Build Ycash native core x86_64
+        working-directory: packages/ycash_core_ffi/rust
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cargo ndk \
+            -t x86_64 \
+            -o ../../../../android/app/src/main/jniLibs \
+            build --release
+
+      # ============================================================
+      # 17. VERIFY NATIVE LIBRARIES
+      # ============================================================
+      - name: Verify native libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          JNI_DIR="android/app/src/main/jniLibs"
+
+          echo "===== Native libraries ====="
+
+          find "$JNI_DIR" \
+            -type f \
+            -name '*.so' \
+            -print \
+            | sort
+
+          test -f "$JNI_DIR/arm64-v8a/libycash_core.so"
+          test -f "$JNI_DIR/armeabi-v7a/libycash_core.so"
+          test -f "$JNI_DIR/x86_64/libycash_core.so"
+
+          file \
+            "$JNI_DIR/arm64-v8a/libycash_core.so" \
+            "$JNI_DIR/armeabi-v7a/libycash_core.so" \
+            "$JNI_DIR/x86_64/libycash_core.so"
+
+      # ============================================================
+      # 18. PREPARE GRADLE
+      # ============================================================
       - name: Prepare Gradle
-        working-directory: ${{ steps.locate.outputs.project_dir }}
+        working-directory: android
         shell: bash
         run: |
           set -euo pipefail
 
           if [ ! -f gradlew ]; then
-            echo "Gradle wrapper not present; generating one."
-
-            gradle wrapper \
-              --gradle-version 8.7
+            echo "::error::Gradle wrapper is missing."
+            exit 1
           fi
 
           chmod +x gradlew
 
-      # ------------------------------------------------------------
-      # 16. Build APK
-      # ------------------------------------------------------------
+          ./gradlew --version
+
+      # ============================================================
+      # 19. BUILD RELEASE APK
+      # ============================================================
       - name: Build release APK
-        working-directory: ${{ steps.locate.outputs.project_dir }}
+        working-directory: android
         shell: bash
         run: |
           set -euo pipefail
@@ -342,43 +370,323 @@ jobs:
             --stacktrace \
             assembleRelease
 
-      # ------------------------------------------------------------
-      # 17. Locate APK
-      # ------------------------------------------------------------
-      - name: Locate APK
+          echo "===== Release APKs ====="
+
+          find "$PWD/app/build/outputs/apk" \
+            -type f \
+            -name '*.apk' \
+            -print
+
+      # ============================================================
+      # 20. LOCATE APK AS ABSOLUTE PATH
+      # ============================================================
+      - name: Locate release APK
         id: apk
-        working-directory: ${{ steps.locate.outputs.project_dir }}
+        working-directory: android
         shell: bash
         run: |
           set -euo pipefail
 
-          APK="$(find app/build/outputs/apk -type f -name '*.apk' -print -quit)"
+          APK="$(
+            find "$PWD/app/build/outputs/apk" \
+              -type f \
+              -name '*.apk' \
+              -print -quit
+          )"
 
           if [ -z "$APK" ]; then
-            echo "::error::No APK was produced."
-            find app/build -type f | sort | head -200
+            echo "::error::No release APK was produced."
+
+            find "$PWD/app/build" \
+              -type f \
+              | sort \
+              | head -300
+
             exit 1
           fi
 
-          echo "APK: $APK"
+          APK="$(realpath "$APK")"
+
+          echo "APK=$APK"
+
+          test -f "$APK"
+
+          file "$APK"
+          ls -lh "$APK"
+
           echo "apk=$APK" >> "$GITHUB_OUTPUT"
 
-      # ------------------------------------------------------------
-      # 18. Upload APK
-      # ------------------------------------------------------------
-      - name: Upload Android APK
+      # ============================================================
+      # 21. GENERATE TEMPORARY SIGNING KEY
+      # ============================================================
+      - name: Generate temporary signing key
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          KEYSTORE="$RUNNER_TEMP/yortal-ci.keystore"
+
+          rm -f "$KEYSTORE"
+
+          keytool \
+            -genkeypair \
+            -v \
+            -keystore "$KEYSTORE" \
+            -storetype JKS \
+            -storepass "$CI_KEYSTORE_PASSWORD" \
+            -keypass "$CI_KEY_PASSWORD" \
+            -alias "$CI_KEY_ALIAS" \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 3650 \
+            -dname "CN=Yortal Wallet CI, OU=Development, O=Yortal, L=Local, ST=Local, C=GB"
+
+          chmod 600 "$KEYSTORE"
+
+          echo "KEYSTORE=$KEYSTORE" >> "$GITHUB_ENV"
+
+      # ============================================================
+      # 22. ZIPALIGN
+      # ============================================================
+      - name: Zipalign APK
+        id: aligned
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          INPUT="${{ steps.apk.outputs.apk }}"
+
+          ZIPALIGN="$ANDROID_HOME/build-tools/${ANDROID_BUILD_TOOLS}/zipalign"
+
+          OUTPUT="$RUNNER_TEMP/Yortal-Wallet-aligned.apk"
+
+          test -f "$INPUT"
+          test -x "$ZIPALIGN"
+
+          rm -f "$OUTPUT"
+
+          "$ZIPALIGN" \
+            -f \
+            -p \
+            4 \
+            "$INPUT" \
+            "$OUTPUT"
+
+          test -f "$OUTPUT"
+
+          echo "Aligned APK:"
+          ls -lh "$OUTPUT"
+
+          echo "apk=$OUTPUT" >> "$GITHUB_OUTPUT"
+
+      # ============================================================
+      # 23. SIGN FINAL APK
+      # ============================================================
+      - name: Sign release APK
+        id: signed
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          INPUT="${{ steps.aligned.outputs.apk }}"
+
+          APKSIGNER="$ANDROID_HOME/build-tools/${ANDROID_BUILD_TOOLS}/apksigner"
+
+          OUTPUT="$RUNNER_TEMP/Yortal-Wallet-SIGNED.apk"
+
+          test -f "$INPUT"
+          test -x "$APKSIGNER"
+          test -f "$KEYSTORE"
+
+          rm -f "$OUTPUT"
+
+          "$APKSIGNER" sign \
+            --ks "$KEYSTORE" \
+            --ks-type JKS \
+            --ks-pass "pass:$CI_KEYSTORE_PASSWORD" \
+            --key-pass "pass:$CI_KEY_PASSWORD" \
+            --ks-key-alias "$CI_KEY_ALIAS" \
+            --out "$OUTPUT" \
+            "$INPUT"
+
+          test -f "$OUTPUT"
+
+          echo "Signed APK:"
+          ls -lh "$OUTPUT"
+
+          echo "apk=$OUTPUT" >> "$GITHUB_OUTPUT"
+
+      # ============================================================
+      # 24. VERIFY APK SIGNATURE
+      # ============================================================
+      - name: Verify APK signature
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="${{ steps.signed.outputs.apk }}"
+
+          APKSIGNER="$ANDROID_HOME/build-tools/${ANDROID_BUILD_TOOLS}/apksigner"
+
+          test -f "$APK"
+
+          "$APKSIGNER" verify \
+            --verbose \
+            "$APK"
+
+          echo "APK signature verified."
+
+      # ============================================================
+      # 25. VERIFY APK ALIGNMENT
+      # ============================================================
+      - name: Verify APK alignment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="${{ steps.signed.outputs.apk }}"
+
+          ZIPALIGN="$ANDROID_HOME/build-tools/${ANDROID_BUILD_TOOLS}/zipalign"
+
+          test -f "$APK"
+
+          "$ZIPALIGN" \
+            -c \
+            -P 4 \
+            "$APK"
+
+          echo "APK alignment verified."
+
+      # ============================================================
+      # 26. VERIFY NATIVE LIBRARIES INSIDE APK
+      # ============================================================
+      - name: Verify native core inside APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="${{ steps.signed.outputs.apk }}"
+
+          echo "===== APK native libraries ====="
+
+          unzip -l "$APK" \
+            | grep 'lib/.*libycash_core.so'
+
+          unzip -l "$APK" \
+            | grep 'lib/arm64-v8a/libycash_core.so'
+
+      # ============================================================
+      # 27. COPY FINAL APK TO WORKSPACE
+      # ============================================================
+      - name: Prepare final APK artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          INPUT="${{ steps.signed.outputs.apk }}"
+
+          OUTPUT="$GITHUB_WORKSPACE/Yortal-Wallet-Android-SIGNED.apk"
+
+          test -f "$INPUT"
+
+          rm -f "$OUTPUT"
+
+          cp "$INPUT" "$OUTPUT"
+
+          test -f "$OUTPUT"
+
+          echo "Final APK:"
+          ls -lh "$OUTPUT"
+
+      # ============================================================
+      # 28. BUILD INFORMATION
+      # ============================================================
+      - name: Create build information
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > "$RUNNER_TEMP/yortal-build-info.txt" <<EOF
+          Yortal Wallet Android Build
+          ===========================
+
+          Flutter:
+          ${FLUTTER_VERSION}
+
+          Android API:
+          ${ANDROID_API}
+
+          Android Build Tools:
+          ${ANDROID_BUILD_TOOLS}
+
+          Android NDK:
+          ${ANDROID_NDK}
+
+          Native targets:
+          ARM64
+          ARMv7
+          x86_64
+
+          Native core:
+          libycash_core.so
+
+          Sapling parameters:
+          Spend parameter: 1T02YAgRo3Rx6ksXphGuDKadkV5K49RW2
+          Output parameter: 1OfbiqE2uzdJqxFfC8s8h0l_s4KT8_Io6
+
+          Build:
+          Release
+
+          APK:
+          Yortal-Wallet-Android-SIGNED.apk
+
+          Signing:
+          Temporary CI development key
+
+          Permanent production signing:
+          NOT USED
+
+          Ycashd:
+          NOT embedded in this wallet build.
+
+          Wallet/node architecture:
+          Separate development components.
+
+          APK signature:
+          Verified
+
+          APK alignment:
+          Verified
+          EOF
+
+          cat "$RUNNER_TEMP/yortal-build-info.txt"
+
+      # ============================================================
+      # 29. UPLOAD APK
+      # ============================================================
+      - name: Upload Yortal Wallet APK
         uses: actions/upload-artifact@v4
         with:
-          name: YcashNode-Android-ARM64
-          path: ${{ steps.locate.outputs.project_dir }}/${{ steps.apk.outputs.apk }}
+          name: Yortal-Wallet-Android-SIGNED
+          path: ${{ github.workspace }}/Yortal-Wallet-Android-SIGNED.apk
           if-no-files-found: error
 
-      # ------------------------------------------------------------
-      # 19. Upload daemon separately for debugging
-      # ------------------------------------------------------------
-      - name: Upload ycashd ARM64 binary
+      # ============================================================
+      # 30. UPLOAD NATIVE LIBRARIES
+      # ============================================================
+      - name: Upload native Ycash libraries
         uses: actions/upload-artifact@v4
         with:
-          name: ycashd-Android-ARM64
-          path: ${{ steps.binary.outputs.binary }}
+          name: Yortal-Wallet-Native-Libraries
+          path: android/app/src/main/jniLibs/**/*.so
+          if-no-files-found: error
+
+      # ============================================================
+      # 31. UPLOAD BUILD INFORMATION
+      # ============================================================
+      - name: Upload build information
+        uses: actions/upload-artifact@v4
+        with:
+          name: Yortal-Wallet-Build-Information
+          path: ${{ runner.temp }}/yortal-build-info.txt
           if-no-files-found: error
