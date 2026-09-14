@@ -164,7 +164,7 @@ jobs:
       # ============================================================
       # 4b. FORCE NATIVE LIBRARY PACKAGING
       # ============================================================
-      - name: Force uncompressed native library packaging
+      - name: Force native library packaging
         working-directory: ${{ steps.locate.outputs.project_dir }}
         shell: bash
         run: |
@@ -188,8 +188,7 @@ jobs:
           with open(path, encoding="utf-8") as f:
               content = f.read()
 
-          # Remove an existing generated packaging block so the
-          # workflow is safe to run repeatedly.
+          # Remove previously generated packaging blocks.
           content = re.sub(
               r'\n\s*packaging\s*\{\s*jniLibs\s*\{\s*useLegacyPackaging\s*=\s*true\s*\}\s*\}',
               '',
@@ -1057,9 +1056,6 @@ jobs:
             echo \
               "::error::libc++_shared.so is missing from the unsigned APK."
 
-            echo \
-              "The CI staging directory contained it, but Gradle did not package it."
-
             unzip -l "$APK" |
               grep 'lib/' || true
 
@@ -1117,9 +1113,9 @@ jobs:
             >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 24. ZIPALIGN
+      # 24. FORCE NATIVE LIBRARIES UNCOMPRESSED + ZIPALIGN
       # ============================================================
-      - name: Zipalign APK
+      - name: Force native libraries uncompressed and zipalign APK
         id: aligned
         shell: bash
         run: |
@@ -1128,36 +1124,162 @@ jobs:
           INPUT="${{ steps.unsigned_apk.outputs.apk }}"
 
           BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
-
           ZIPALIGN="$BUILD_TOOLS/zipalign"
 
+          REPACKED="$RUNNER_TEMP/YcashNode-Android-ARM64-repacked.apk"
           ALIGNED="$RUNNER_TEMP/YcashNode-Android-ARM64-aligned.apk"
-
-          echo "INPUT=$INPUT"
-          echo "ALIGNED=$ALIGNED"
 
           test -f "$INPUT"
           test -x "$ZIPALIGN"
 
-          rm -f "$ALIGNED"
+          rm -f "$REPACKED" "$ALIGNED"
+
+          echo "=========================================="
+          echo "FORCING NATIVE LIBRARIES STORED"
+          echo "=========================================="
+
+          python3 - "$INPUT" "$REPACKED" <<'PYEOF'
+          import sys
+          import zipfile
+
+          src = sys.argv[1]
+          dst = sys.argv[2]
+
+          force_stored = {
+              "lib/arm64-v8a/libycashd.so",
+              "lib/arm64-v8a/libc++_shared.so",
+          }
+
+          found = set()
+
+          with zipfile.ZipFile(src, "r") as zin:
+              with zipfile.ZipFile(
+                  dst,
+                  "w",
+                  allowZip64=True
+              ) as zout:
+
+                  for info in zin.infolist():
+
+                      data = zin.read(info.filename)
+
+                      if info.filename in force_stored:
+                          info.compress_type = zipfile.ZIP_STORED
+                          found.add(info.filename)
+
+                          print(
+                              f"FORCED STORED: {info.filename} "
+                              f"({len(data)} bytes)"
+                          )
+
+                      zout.writestr(info, data)
+
+          missing = force_stored - found
+
+          if missing:
+              print("ERROR: Required native libraries missing:")
+              for item in sorted(missing):
+                  print(f"  {item}")
+              sys.exit(1)
+
+          print("Native libraries successfully stored uncompressed.")
+          PYEOF
+
+          test -f "$REPACKED"
+
+          echo
+          echo "===== VERIFY REPACKED APK ====="
+
+          unzip -lv "$REPACKED" |
+            grep -E \
+              'lib/arm64-v8a/(libycashd\.so|libc\+\+_shared\.so)$'
+
+          check_stored() {
+            local NAME="$1"
+
+            ENTRY="$(
+              unzip -lv "$REPACKED" |
+              grep -E \
+                "lib/arm64-v8a/${NAME}$" |
+              head -1 || true
+            )"
+
+            if [ -z "$ENTRY" ]; then
+              echo "::error::$NAME missing from repacked APK."
+              exit 1
+            fi
+
+            echo "$ENTRY"
+
+            METHOD="$(echo "$ENTRY" | awk '{print $2}')"
+
+            if [ "$METHOD" != "Stored" ]; then
+              echo "::error::$NAME is still compressed: $METHOD"
+              exit 1
+            fi
+
+            echo "$NAME = STORED"
+          }
+
+          check_stored "libycashd.so"
+          check_stored "libc++_shared.so"
+
+          echo
+          echo "=========================================="
+          echo "ZIPALIGN"
+          echo "=========================================="
 
           "$ZIPALIGN" \
             -f \
             -p \
             4 \
-            "$INPUT" \
+            "$REPACKED" \
             "$ALIGNED"
 
           test -f "$ALIGNED"
 
-          echo \
-            "Aligned APK:"
+          echo
+          echo "===== FINAL ALIGNED NATIVE ENTRIES ====="
+
+          unzip -lv "$ALIGNED" |
+            grep -E \
+              'lib/arm64-v8a/(libycashd\.so|libc\+\+_shared\.so)$'
+
+          check_aligned_stored() {
+            local NAME="$1"
+
+            ENTRY="$(
+              unzip -lv "$ALIGNED" |
+              grep -E \
+                "lib/arm64-v8a/${NAME}$" |
+              head -1 || true
+            )"
+
+            if [ -z "$ENTRY" ]; then
+              echo "::error::$NAME missing after zipalign."
+              exit 1
+            fi
+
+            METHOD="$(echo "$ENTRY" | awk '{print $2}')"
+
+            if [ "$METHOD" != "Stored" ]; then
+              echo "::error::$NAME became compressed after zipalign."
+              echo "Compression method: $METHOD"
+              exit 1
+            fi
+
+            echo "$NAME remains STORED after zipalign."
+          }
+
+          check_aligned_stored "libycashd.so"
+          check_aligned_stored "libc++_shared.so"
+
+          echo
+          echo "APK successfully repacked and zipaligned."
 
           ls -lh "$ALIGNED"
 
-          echo \
-            "apk=$ALIGNED" \
-            >> "$GITHUB_OUTPUT"
+          echo "apk=$ALIGNED" >> "$GITHUB_OUTPUT"
 
       # ============================================================
       # 25. SIGN FINAL APK
@@ -1171,7 +1293,6 @@ jobs:
           INPUT="${{ steps.aligned.outputs.apk }}"
 
           BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
-
           APKSIGNER="$BUILD_TOOLS/apksigner"
 
           SIGNED="$RUNNER_TEMP/YcashNode-Android-ARM64-SIGNED.apk"
@@ -1196,14 +1317,10 @@ jobs:
 
           test -f "$SIGNED"
 
-          echo \
-            "Signed APK:"
-
+          echo "Signed APK:"
           ls -lh "$SIGNED"
 
-          echo \
-            "apk=$SIGNED" \
-            >> "$GITHUB_OUTPUT"
+          echo "apk=$SIGNED" >> "$GITHUB_OUTPUT"
 
       # ============================================================
       # 26. VERIFY APK SIGNATURE
@@ -1216,21 +1333,18 @@ jobs:
           APK="${{ steps.signed.outputs.apk }}"
 
           BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
-
           APKSIGNER="$BUILD_TOOLS/apksigner"
 
           test -f "$APK"
           test -x "$APKSIGNER"
 
-          echo \
-            "===== APK SIGNATURE VERIFICATION ====="
+          echo "===== APK SIGNATURE VERIFICATION ====="
 
           "$APKSIGNER" verify \
             --verbose \
             "$APK"
 
-          echo \
-            "===== APK VERIFIED ====="
+          echo "===== APK VERIFIED ====="
 
       # ============================================================
       # 27. VERIFY APK ZIP ALIGNMENT
@@ -1243,7 +1357,6 @@ jobs:
           APK="${{ steps.signed.outputs.apk }}"
 
           BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
-
           ZIPALIGN="$BUILD_TOOLS/zipalign"
 
           test -f "$APK"
@@ -1255,8 +1368,7 @@ jobs:
             4 \
             "$APK"
 
-          echo \
-            "APK alignment verified."
+          echo "APK alignment verified."
 
       # ============================================================
       # 28. FINAL APK INSPECTION
@@ -1270,17 +1382,11 @@ jobs:
 
           test -f "$APK"
 
-          echo \
-            "=========================================="
-
-          echo \
-            "FINAL Ycash NODE APK"
-
-          echo \
-            "=========================================="
+          echo "=========================================="
+          echo "FINAL Ycash NODE APK"
+          echo "=========================================="
 
           ls -lh "$APK"
-
           file "$APK"
 
           echo
@@ -1299,8 +1405,7 @@ jobs:
             | head -100
 
           echo
-          echo \
-            "Native library compression:"
+          echo "Native library compression:"
 
           unzip -lv "$APK" |
             grep -E \
@@ -1337,8 +1442,7 @@ jobs:
             "libc++_shared.so is present in the final APK."
 
           echo
-          echo \
-            "===== Native library entries ====="
+          echo "===== Native library entries ====="
 
           unzip -lv "$APK" |
             grep -E \
@@ -1348,8 +1452,7 @@ jobs:
             local NAME="$1"
 
             echo
-            echo \
-              "Checking $NAME..."
+            echo "Checking $NAME..."
 
             ENTRY="$(
               unzip -lv "$APK" |
@@ -1359,10 +1462,7 @@ jobs:
             )"
 
             if [ -z "$ENTRY" ]; then
-
-              echo \
-                "::error::$NAME was not found in the APK."
-
+              echo "::error::$NAME was not found in the APK."
               exit 1
             fi
 
@@ -1371,29 +1471,19 @@ jobs:
             METHOD="$(echo "$ENTRY" | awk '{print $2}')"
 
             if [ "$METHOD" != "Stored" ]; then
-
-              echo \
-                "::error::$NAME is compressed in the APK."
-
-              echo \
-                "Compression method: $METHOD"
-
+              echo "::error::$NAME is compressed in the APK."
+              echo "Compression method: $METHOD"
               exit 1
             fi
 
-            echo \
-              "$NAME is STORED/uncompressed."
+            echo "$NAME is STORED/uncompressed."
           }
 
-          check_uncompressed \
-            "libycashd.so"
-
-          check_uncompressed \
-            "libc++_shared.so"
+          check_uncompressed "libycashd.so"
+          check_uncompressed "libc++_shared.so"
 
           echo
-          echo \
-            "Both native libraries are stored uncompressed."
+          echo "Both native libraries are stored uncompressed."
 
       # ============================================================
       # 29. COPY FINAL APK TO WORKSPACE
@@ -1415,9 +1505,7 @@ jobs:
 
           test -f "$OUT"
 
-          echo \
-            "Final artifact:"
-
+          echo "Final artifact:"
           ls -lh "$OUT"
 
       # ============================================================
