@@ -37,7 +37,7 @@ jobs:
       # =========================================================
       # 2. PREPARE PROJECT ROOT
       #
-      # Supports either:
+      # Supports:
       #
       # A) Project already extracted at repository root:
       #
@@ -47,15 +47,31 @@ jobs:
       #
       # OR
       #
-      # B) Repository contains the project ZIP.
+      # B) Repository contains ANY ZIP file containing the
+      #    Ycash Android Node project.
       #
-      # The ZIP is extracted into the GitHub workspace.
+      # ZIP filename does NOT matter.
+      #
+      # The workflow searches ALL .zip files recursively and
+      # identifies a valid project by checking for:
+      #
+      #    Cargo.toml
+      #    crates/
+      #    android-app/
+      #
+      # The project may also be inside a nested directory in
+      # the ZIP.
       # =========================================================
       - name: Prepare project root
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
+          echo "=========================================="
+          echo "PREPARING Ycash PROJECT ROOT"
+          echo "=========================================="
+
+          echo
           echo "Current repository:"
           pwd
 
@@ -64,106 +80,261 @@ jobs:
           ls -la
 
           # -----------------------------------------------------
-          # Already at root?
+          # Already at repository root?
           # -----------------------------------------------------
-          if [ -f "Cargo.toml" ]; then
+          if [ -f "Cargo.toml" ] && \
+             [ -d "crates" ] && \
+             [ -d "android-app" ]; then
+
             echo
-            echo "Cargo.toml already exists at repository root."
+            echo "Valid Ycash project already exists at repository root."
             echo "Using existing project."
 
           else
+
             echo
-            echo "Cargo.toml not found at root."
-            echo "Searching for Ycash project ZIP..."
+            echo "Valid project not found at repository root."
+            echo
+            echo "Searching ALL ZIP files recursively..."
+            echo "ZIP filename is ignored."
 
             ZIP=""
 
-            # Preferred filename
-            if [ -f "Ycash-Android-Node-Rust-FIXED-v0.12-GITHUB-ROOT.zip" ]; then
-              ZIP="Ycash-Android-Node-Rust-FIXED-v0.12-GITHUB-ROOT.zip"
-            fi
+            # ---------------------------------------------------
+            # Find every ZIP recursively.
+            #
+            # No filename pattern is required.
+            # ---------------------------------------------------
+            mapfile -d '' ZIP_FILES < <(
+              find . \
+                -type f \
+                -iname '*.zip' \
+                -not -path './.git/*' \
+                -print0 \
+                | sort -z
+            )
 
-            # Previous filename
-            if [ -z "$ZIP" ] && [ -f "Ycash-Android-Node-Rust-FIXED-v0.12.zip" ]; then
-              ZIP="Ycash-Android-Node-Rust-FIXED-v0.12.zip"
-            fi
-
-            # Generic search
-            if [ -z "$ZIP" ]; then
-              ZIP="$(
-                find . \
-                  -maxdepth 3 \
-                  -type f \
-                  -iname '*ycash*android*node*.zip' \
-                  | head -n 1 || true
-              )"
-            fi
-
-            if [ -z "$ZIP" ]; then
+            if [ "${#ZIP_FILES[@]}" -eq 0 ]; then
               echo
-              echo "ERROR: Could not find Cargo.toml."
-              echo "ERROR: Could not find a Ycash Android Node ZIP."
+              echo "ERROR: No ZIP files were found."
               echo
               echo "Repository files:"
-              find . -maxdepth 4 -type f | sort
+              find . -maxdepth 6 -type f | sort
               exit 1
             fi
 
             echo
-            echo "Found:"
-            echo "$ZIP"
+            echo "ZIP files discovered:"
+            for candidate in "${ZIP_FILES[@]}"; do
+              echo "  - $candidate"
+            done
 
+            # ---------------------------------------------------
+            # Test every ZIP.
+            #
+            # A ZIP is considered a candidate when it contains:
+            #
+            #    Cargo.toml
+            #
+            # and either:
+            #
+            #    crates/
+            #
+            # and:
+            #
+            #    android-app/
+            #
+            # This works whether those files are at ZIP root or
+            # inside a nested project directory.
+            # ---------------------------------------------------
+
+            for candidate in "${ZIP_FILES[@]}"; do
+
+              echo
+              echo "------------------------------------------"
+              echo "Checking ZIP:"
+              echo "$candidate"
+              echo "------------------------------------------"
+
+              # -------------------------------------------------
+              # Verify ZIP is readable.
+              # -------------------------------------------------
+              if ! unzip -tq "$candidate" >/dev/null 2>&1; then
+                echo "SKIP: Invalid or corrupted ZIP."
+                continue
+              fi
+
+              echo "ZIP integrity: OK"
+
+              # -------------------------------------------------
+              # Check for Cargo.toml.
+              # -------------------------------------------------
+              if ! unzip -Z1 "$candidate" 2>/dev/null \
+                | grep -qE '(^|/)Cargo\.toml$'; then
+
+                echo "SKIP: No Cargo.toml."
+                continue
+              fi
+
+              echo "Cargo.toml: FOUND"
+
+              # -------------------------------------------------
+              # Check for crates directory/content.
+              #
+              # ZIP listings sometimes do not contain explicit
+              # directory entries, so also accept files below
+              # crates/.
+              # -------------------------------------------------
+              if ! unzip -Z1 "$candidate" 2>/dev/null \
+                | grep -qE '(^|/)crates(/|/)'; then
+
+                echo "SKIP: No crates/ directory."
+                continue
+              fi
+
+              echo "crates/: FOUND"
+
+              # -------------------------------------------------
+              # Check for android-app directory/content.
+              # -------------------------------------------------
+              if ! unzip -Z1 "$candidate" 2>/dev/null \
+                | grep -qE '(^|/)android-app(/|/)'; then
+
+                echo "SKIP: No android-app/ directory."
+                continue
+              fi
+
+              echo "android-app/: FOUND"
+
+              # -------------------------------------------------
+              # Valid project ZIP found.
+              # -------------------------------------------------
+              ZIP="$candidate"
+
+              echo
+              echo "=========================================="
+              echo "VALID YCASH PROJECT ZIP FOUND"
+              echo "=========================================="
+              echo "$ZIP"
+
+              break
+            done
+
+            # ---------------------------------------------------
+            # No valid ZIP found.
+            # ---------------------------------------------------
+            if [ -z "$ZIP" ]; then
+
+              echo
+              echo "=========================================="
+              echo "ERROR: NO VALID YCASH PROJECT ZIP"
+              echo "=========================================="
+
+              echo
+              echo "ZIP files that were checked:"
+
+              for candidate in "${ZIP_FILES[@]}"; do
+                echo "  - $candidate"
+              done
+
+              echo
+              echo "Repository files:"
+              find . -maxdepth 6 -type f | sort
+
+              exit 1
+            fi
+
+            # ---------------------------------------------------
+            # Extract selected project.
+            # ---------------------------------------------------
             rm -rf .ycash-project
             mkdir -p .ycash-project
 
             echo
-            echo "Extracting project..."
+            echo "=========================================="
+            echo "EXTRACTING SELECTED PROJECT"
+            echo "=========================================="
+
+            echo "ZIP:"
+            echo "$ZIP"
+
             unzip -q "$ZIP" -d .ycash-project
 
             # ---------------------------------------------------
-            # Check if ZIP was already flattened.
+            # Locate the project directory.
+            #
+            # We search for Cargo.toml and then walk upward
+            # looking for the directory containing the required
+            # project structure.
             # ---------------------------------------------------
-            if [ -f ".ycash-project/Cargo.toml" ]; then
 
-              echo "ZIP contains project at its root."
+            PROJECT_ROOT=""
 
-              cp -a .ycash-project/. .
+            while IFS= read -r -d '' cargo_file; do
 
-            else
-
-              # -------------------------------------------------
-              # Find nested Cargo.toml.
-              # -------------------------------------------------
-              NESTED_CARGO="$(
-                find .ycash-project \
-                  -type f \
-                  -name Cargo.toml \
-                  | head -n 1 || true
-              )"
-
-              if [ -z "$NESTED_CARGO" ]; then
-                echo
-                echo "ERROR: Extracted ZIP contains no Cargo.toml."
-                echo
-                echo "Extracted files:"
-                find .ycash-project -maxdepth 6 -type f | sort
-                exit 1
-              fi
-
-              PROJECT_ROOT="$(dirname "$NESTED_CARGO")"
+              candidate_root="$(dirname "$cargo_file")"
 
               echo
-              echo "Nested project detected:"
-              echo "$PROJECT_ROOT"
+              echo "Checking extracted Cargo project:"
+              echo "$candidate_root"
 
-              cp -a "$PROJECT_ROOT"/. .
+              if [ -d "$candidate_root/crates" ] && \
+                 [ -d "$candidate_root/android-app" ]; then
+
+                PROJECT_ROOT="$candidate_root"
+
+                echo "Valid project root found:"
+                echo "$PROJECT_ROOT"
+
+                break
+              fi
+
+            done < <(
+              find .ycash-project \
+                -type f \
+                -name Cargo.toml \
+                -print0
+            )
+
+            # ---------------------------------------------------
+            # Safety check.
+            # ---------------------------------------------------
+            if [ -z "$PROJECT_ROOT" ]; then
+
+              echo
+              echo "ERROR: ZIP contained Cargo.toml but no valid"
+              echo "Ycash project structure was found."
+
+              echo
+              echo "Expected:"
+              echo "  Cargo.toml"
+              echo "  crates/"
+              echo "  android-app/"
+
+              echo
+              echo "Extracted files:"
+              find .ycash-project \
+                -maxdepth 8 \
+                -type f \
+                | sort
+
+              exit 1
             fi
 
+            # ---------------------------------------------------
+            # Copy project to GitHub repository root.
+            # ---------------------------------------------------
+            echo
+            echo "Copying project to repository root..."
+
+            cp -a "$PROJECT_ROOT"/. .
+
             rm -rf .ycash-project
+
           fi
 
           # =====================================================
-          # Verify project root
+          # FINAL PROJECT ROOT VERIFICATION
           # =====================================================
 
           echo
@@ -207,7 +378,9 @@ jobs:
           done
 
           echo
-          echo "Project root preparation complete."
+          echo "=========================================="
+          echo "PROJECT ROOT READY"
+          echo "=========================================="
 
       # =========================================================
       # 3. JAVA 17
@@ -232,7 +405,7 @@ jobs:
       - name: Install Android SDK and NDK
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
 
@@ -259,7 +432,7 @@ jobs:
       - name: Configure Android Rust linker
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           NDK="$ANDROID_HOME/ndk/${ANDROID_NDK}"
           LLVM="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
@@ -286,11 +459,6 @@ jobs:
           echo "Cargo Android linker configuration:"
           cat .cargo/config.toml
 
-          # cc-rs (used by build scripts such as libsqlite3-sys's
-          # "bundled" feature) does not read .cargo/config.toml's
-          # `linker` key — it looks for CC_*/AR_* env vars instead.
-          # Export the same compiler/archiver here so later cargo
-          # build steps can find them.
           echo "CC_aarch64_linux_android=$LLVM/aarch64-linux-android${ANDROID_API}-clang" >> "$GITHUB_ENV"
           echo "CXX_aarch64_linux_android=$LLVM/aarch64-linux-android${ANDROID_API}-clang++" >> "$GITHUB_ENV"
           echo "AR_aarch64_linux_android=$LLVM/llvm-ar" >> "$GITHUB_ENV"
@@ -302,7 +470,7 @@ jobs:
       - name: Verify Rust workspace
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           echo "Rust version:"
           rustc --version
@@ -344,7 +512,7 @@ jobs:
       - name: Build Ycash ARM64 Android node
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           cargo build \
             --release \
@@ -357,7 +525,7 @@ jobs:
       - name: Verify ARM64 node binary
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           NODE="target/${RUST_TARGET}/release/ycash-android-node"
 
@@ -382,17 +550,11 @@ jobs:
 
       # =========================================================
       # 12. BUNDLE EXACT RUST NODE INTO APK ASSETS
-      #
-      # The Rust node ships as a standalone ELF executable that
-      # NodeService.java copies out of assets and launches with
-      # ProcessBuilder — it is not a JNI shared library, so it is
-      # never placed under jniLibs/ and never produces a
-      # lib/<abi>/*.so entry in the APK.
       # =========================================================
       - name: Bundle Rust node into Android app
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           NODE="target/${RUST_TARGET}/release/ycash-android-node"
           ASSETS="android-app/app/src/main/assets"
@@ -416,7 +578,7 @@ jobs:
       - name: Verify Android project
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           test -f android-app/settings.gradle
           test -f android-app/app/build.gradle
@@ -435,22 +597,12 @@ jobs:
 
       # =========================================================
       # 15. BUILD APK
-      #
-      # IMPORTANT:
-      #
-      # Gradle/AGP is the ONLY APK packager.
-      #
-      # We do NOT:
-      #
-      # unzip APK
-      # modify APK
-      # zip APK again
       # =========================================================
       - name: Build Android APK with Gradle
         working-directory: android-app
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           gradle \
             --no-daemon \
@@ -464,7 +616,7 @@ jobs:
         id: locate_apk
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           APK="android-app/app/build/outputs/apk/debug/app-debug.apk"
 
@@ -476,19 +628,12 @@ jobs:
           ls -lh "$APK"
 
       # =========================================================
-      # 17. VERIFY BUNDLED RUST NODE BEFORE ALIGNMENT
-      #
-      # This app has no JNI shared library — the Rust node is a
-      # standalone executable shipped as an asset and launched
-      # via ProcessBuilder (see NodeService.java). There is no
-      # lib/arm64-v8a/libycashd.so and no libc++_shared.so to
-      # check for; asserting on them made this step fail even
-      # though the APK was built correctly.
+      # 17. VERIFY BUNDLED RUST NODE
       # =========================================================
-      - name: Verify native libraries in Gradle APK
+      - name: Verify native node in Gradle APK
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           APK="${{ steps.locate_apk.outputs.apk }}"
 
@@ -506,7 +651,7 @@ jobs:
       - name: Generate temporary debug signing key
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           rm -f "$CI_KEYSTORE"
 
@@ -530,14 +675,11 @@ jobs:
 
       # =========================================================
       # 19. ZIPALIGN
-      #
-      # Operates directly on the complete Gradle APK.
-      # No manual APK reconstruction.
       # =========================================================
       - name: Zipalign APK
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           INPUT="android-app/app/build/outputs/apk/debug/app-debug.apk"
           ALIGNED="android-app/app/build/outputs/apk/debug/ycash-android-node-aligned.apk"
@@ -563,19 +705,11 @@ jobs:
 
       # =========================================================
       # 20. VERIFY ZIPALIGN
-      #
-      # Check mode requires the same mandatory <align> positional
-      # argument as the align step above (4), passed via -p/align
-      # rather than -P <pagesize_kb>. The previous invocation
-      # used "-P 4" and never supplied <align> at all, so
-      # zipalign couldn't parse its arguments and exited with the
-      # usage banner (exit code 2) instead of actually checking
-      # anything.
       # =========================================================
       - name: Verify zip alignment
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           ALIGNED="android-app/app/build/outputs/apk/debug/ycash-android-node-aligned.apk"
 
@@ -594,7 +728,7 @@ jobs:
       - name: Sign aligned APK
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           ALIGNED="android-app/app/build/outputs/apk/debug/ycash-android-node-aligned.apk"
 
@@ -627,7 +761,7 @@ jobs:
       - name: Verify APK signature
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           SIGNED="android-app/app/build/outputs/apk/debug/ycash-android-node-debug-signed.apk"
 
@@ -642,14 +776,11 @@ jobs:
 
       # =========================================================
       # 23. VERIFY FINAL APK CONTENTS
-      #
-      # Same correction as step 17: no JNI shared library exists
-      # in this app, so only the bundled asset is checked.
       # =========================================================
       - name: Verify final signed APK contents
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           SIGNED="android-app/app/build/outputs/apk/debug/ycash-android-node-debug-signed.apk"
 
@@ -669,7 +800,7 @@ jobs:
       - name: Display final APK information
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           SIGNED="android-app/app/build/outputs/apk/debug/ycash-android-node-debug-signed.apk"
 
