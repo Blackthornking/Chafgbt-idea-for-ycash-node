@@ -101,7 +101,84 @@ jobs:
           echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 4. FIX JVM TARGETS
+      # 4. CREATE DEFAULT YCASH CONFIG
+      #
+      # This creates a safe default configuration inside the
+      # Android project's assets.
+      #
+      # APK location:
+      #
+      #   assets/ycash/ycash.conf
+      #
+      # The Android application can copy this file into its
+      # writable private node data directory on first launch.
+      #
+      # IMPORTANT:
+      # APK assets are read-only. The Options UI must edit the
+      # writable copy after it has been copied by the application.
+      # ============================================================
+      - name: Create default ycash.conf
+        working-directory: ${{ steps.locate.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CONFIG_DIR="app/src/main/assets/ycash"
+          CONFIG_FILE="$CONFIG_DIR/ycash.conf"
+
+          mkdir -p "$CONFIG_DIR"
+
+          cat > "$CONFIG_FILE" <<'EOF'
+          # ============================================================
+          # Ycash Android Node Configuration
+          # ============================================================
+          #
+          # This is the default configuration packaged with the
+          # Android Ycash node.
+          #
+          # On first launch, the Android application should copy this
+          # file to its writable private node data directory.
+          #
+          # The Options screen should modify the writable copy.
+          #
+          # ============================================================
+
+          # Run as a server/node.
+          server=1
+
+          # Listen for peer connections.
+          listen=1
+
+          # Local RPC interface.
+          rpcbind=127.0.0.1
+
+          # Only allow local Android application RPC access.
+          rpcallowip=127.0.0.1
+
+          # Maintain transaction index.
+          txindex=1
+          EOF
+
+          echo "=========================================="
+          echo "DEFAULT YCASH CONFIG CREATED"
+          echo "=========================================="
+
+          test -f "$CONFIG_FILE"
+
+          echo
+          echo "Config path:"
+          echo "$CONFIG_FILE"
+
+          echo
+          echo "Config contents:"
+          cat "$CONFIG_FILE"
+
+          echo
+          echo "Config size:"
+          wc -c "$CONFIG_FILE"
+
+      # ============================================================
+      # 5. FIX JVM TARGETS
       # ============================================================
       - name: Fix Kotlin/Java JVM target mismatch
         working-directory: ${{ steps.locate.outputs.project_dir }}
@@ -162,7 +239,7 @@ jobs:
           cat "$GRADLE_FILE"
 
       # ============================================================
-      # 5. JAVA
+      # 6. JAVA
       # ============================================================
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -172,7 +249,7 @@ jobs:
           cache: gradle
 
       # ============================================================
-      # 6. ANDROID SDK / NDK
+      # 7. ANDROID SDK / NDK
       # ============================================================
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
@@ -190,7 +267,7 @@ jobs:
           yes | sdkmanager --licenses >/dev/null || true
 
       # ============================================================
-      # 7. RUST
+      # 8. RUST
       # ============================================================
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -198,7 +275,7 @@ jobs:
           targets: ${{ env.RUST_TARGET }}
 
       # ============================================================
-      # 8. LOCATE YCASHD
+      # 9. LOCATE YCASHD
       # ============================================================
       - name: Locate ycashd source
         id: ycashd
@@ -235,7 +312,7 @@ jobs:
           echo "ycashd_dir=$YDIR" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 9. INSPECT SOURCE
+      # 10. INSPECT SOURCE
       # ============================================================
       - name: Inspect source tree
         shell: bash
@@ -254,7 +331,7 @@ jobs:
           test -f "$YDIR/Cargo.toml" || true
 
       # ============================================================
-      # 10. ANDROID ARM64 TOOLCHAIN
+      # 11. ANDROID ARM64 TOOLCHAIN
       # ============================================================
       - name: Configure Android ARM64 environment
         shell: bash
@@ -282,12 +359,7 @@ jobs:
           echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
 
       # ============================================================
-      # 11. LOCATE MATCHING NDK LIBC++ RUNTIME
-      #
-      # IMPORTANT:
-      # libycashd.so is linked against Android NDK libc++.
-      # The EXACT libc++_shared.so from the SAME NDK is packaged
-      # beside libycashd.so.
+      # 12. LOCATE MATCHING NDK LIBC++ RUNTIME
       # ============================================================
       - name: Locate matching NDK libc++ runtime
         id: libcxx
@@ -307,7 +379,6 @@ jobs:
 
           if [ ! -f "$LIBCXX" ]; then
             echo "::error::Matching libc++_shared.so was not found."
-            echo "Searching NDK for libc++_shared.so..."
 
             find "$NDK" \
               -name libc++_shared.so \
@@ -325,7 +396,7 @@ jobs:
           echo "libcxx=$LIBCXX" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 12. CARGO ANDROID LINKER
+      # 13. CARGO ANDROID LINKER
       # ============================================================
       - name: Point Cargo at the NDK linker
         shell: bash
@@ -342,7 +413,7 @@ jobs:
           cat "$HOME/.cargo/config.toml"
 
       # ============================================================
-      # 13. AUTOTOOLS
+      # 14. AUTOTOOLS
       # ============================================================
       - name: Install autotools for vcpkg
         shell: bash
@@ -358,7 +429,7 @@ jobs:
             libtool
 
       # ============================================================
-      # 14. VCPKG
+      # 15. VCPKG
       # ============================================================
       - name: Set up vcpkg
         shell: bash
@@ -375,7 +446,7 @@ jobs:
           echo "VCPKG_ROOT=$HOME/vcpkg" >> "$GITHUB_ENV"
 
       # ============================================================
-      # 15. BUILD ANDROID DEPENDENCIES
+      # 16. BUILD ANDROID DEPENDENCIES
       # ============================================================
       - name: Build Boost, libevent, libsodium for Android ARM64
         shell: bash
@@ -411,7 +482,7 @@ jobs:
           echo "VCPKG_INSTALLED=$VCPKG_INSTALLED" >> "$GITHUB_ENV"
 
       # ============================================================
-      # 16. BUILD REAL YCASHD
+      # 17. BUILD REAL YCASHD
       # ============================================================
       - name: Build ycashd for Android ARM64
         working-directory: ${{ steps.ycashd.outputs.ycashd_dir }}
@@ -448,7 +519,7 @@ jobs:
           make -j"$(nproc)"
 
       # ============================================================
-      # 17. FIND YCASHD BINARY
+      # 18. FIND YCASHD BINARY
       # ============================================================
       - name: Find ycashd binary
         id: binary
@@ -485,11 +556,7 @@ jobs:
           echo "binary=$BIN" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 18. INSPECT YCASHD ELF DEPENDENCIES
-      #
-      # Do this BEFORE packaging/stripping.
-      # We specifically want to know whether libc++_shared.so is
-      # listed as a DT_NEEDED dependency.
+      # 19. INSPECT YCASHD ELF DEPENDENCIES
       # ============================================================
       - name: Inspect ycashd native dependencies
         shell: bash
@@ -522,19 +589,7 @@ jobs:
           fi
 
       # ============================================================
-      # 19. PACKAGE YCASHD + MATCHING LIBC++ INTO JNI LIBS
-      #
-      # BOTH libraries are placed into the same ABI directory.
-      #
-      # This is the critical fix for:
-      #
-      #   libc++_shared.so present: false
-      #
-      # and:
-      #
-      #   cannot locate symbol
-      #
-      # from the Android runtime linker.
+      # 20. PACKAGE YCASHD + MATCHING LIBC++
       # ============================================================
       - name: Package ycashd and libc++ into Android application
         shell: bash
@@ -552,19 +607,12 @@ jobs:
           rm -f "$JNI_DIR/libycashd.so"
           rm -f "$JNI_DIR/libc++_shared.so"
 
-          # ----------------------------------------------------------
-          # Copy ycashd
-          # ----------------------------------------------------------
           cp "$BIN" "$JNI_DIR/libycashd.so"
 
           echo "===== ycashd before stripping ====="
           ls -lh "$JNI_DIR/libycashd.so"
           file "$JNI_DIR/libycashd.so"
 
-          # ----------------------------------------------------------
-          # Strip only ycashd.
-          # libc++ is copied exactly as supplied by the NDK.
-          # ----------------------------------------------------------
           if [ -x "${STRIP:-}" ]; then
             "$STRIP" --strip-unneeded "$JNI_DIR/libycashd.so"
           else
@@ -573,9 +621,6 @@ jobs:
 
           chmod 755 "$JNI_DIR/libycashd.so"
 
-          # ----------------------------------------------------------
-          # Copy EXACT libc++ runtime from the SAME NDK.
-          # ----------------------------------------------------------
           cp "$LIBCXX" "$JNI_DIR/libc++_shared.so"
 
           chmod 644 "$JNI_DIR/libc++_shared.so"
@@ -588,7 +633,6 @@ jobs:
           ls -lh "$JNI_DIR/libycashd.so"
           ls -lh "$JNI_DIR/libc++_shared.so"
 
-          echo
           file "$JNI_DIR/libycashd.so"
           file "$JNI_DIR/libc++_shared.so"
 
@@ -600,12 +644,11 @@ jobs:
             -printf '%f\n' \
             | sort
 
-          # Hard fail if either file disappeared.
           test -f "$JNI_DIR/libycashd.so"
           test -f "$JNI_DIR/libc++_shared.so"
 
       # ============================================================
-      # 20. VERIFY PACKAGED NATIVE LIBRARIES
+      # 21. VERIFY PACKAGED NATIVE LIBRARIES
       # ============================================================
       - name: Verify packaged native libraries
         shell: bash
@@ -659,7 +702,7 @@ jobs:
           echo "libc++_shared.so exists and is non-empty."
 
       # ============================================================
-      # 21. VERIFY PACKAGED YCASHD
+      # 22. VERIFY PACKAGED YCASHD
       # ============================================================
       - name: Verify packaged ycashd
         shell: bash
@@ -677,8 +720,6 @@ jobs:
 
           file "$DAEMON"
 
-          # Executing it from nativeLibraryDir only works if it is a PIE
-          # executable; a plain ELF will be refused by modern Android.
           if ! file "$DAEMON" | grep -qi "pie executable"; then
             echo "::error::ycashd is not a PIE executable; Android may refuse to run it."
             exit 1
@@ -689,7 +730,7 @@ jobs:
           ls -l "$DAEMON"
 
       # ============================================================
-      # 22. CONFIRM NATIVE LIBRARY PACKAGING SETTINGS
+      # 23. CONFIRM NATIVE LIBRARY PACKAGING SETTINGS
       # ============================================================
       - name: Confirm native library packaging
         working-directory: ${{ steps.locate.outputs.project_dir }}
@@ -714,7 +755,6 @@ jobs:
 
           if ! grep -q 'android:extractNativeLibs="true"' "$MANIFEST"; then
             echo "::error::extractNativeLibs is not true."
-            echo "ycashd must be extracted to disk because the app execs it."
             exit 1
           fi
 
@@ -725,7 +765,6 @@ jobs:
 
           if ! grep -q 'useLegacyPackaging = true' "$GRADLE_FILE"; then
             echo "::error::jniLibs.useLegacyPackaging = true was not found."
-            echo "Native libraries may remain compressed inside the APK."
             exit 1
           fi
 
@@ -735,7 +774,45 @@ jobs:
           echo "Native library packaging settings are correct."
 
       # ============================================================
-      # 23. PREPARE GRADLE
+      # 24. VERIFY DEFAULT YCASH CONFIG BEFORE APK BUILD
+      #
+      # This confirms that the config created in step 4 still exists
+      # immediately before Gradle packages the application.
+      # ============================================================
+      - name: Verify default ycash.conf
+        working-directory: ${{ steps.locate.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CONFIG_FILE="app/src/main/assets/ycash/ycash.conf"
+
+          echo "=========================================="
+          echo "VERIFY DEFAULT YCASH CONFIG"
+          echo "=========================================="
+
+          if [ ! -f "$CONFIG_FILE" ]; then
+            echo "::error::ycash.conf is missing."
+            exit 1
+          fi
+
+          if [ ! -s "$CONFIG_FILE" ]; then
+            echo "::error::ycash.conf is empty."
+            exit 1
+          fi
+
+          echo "Config found:"
+          echo "$CONFIG_FILE"
+
+          echo
+          echo "===== Config ====="
+          cat "$CONFIG_FILE"
+
+          echo
+          echo "Config verification successful."
+
+      # ============================================================
+      # 25. PREPARE GRADLE
       # ============================================================
       - name: Prepare Gradle
         working-directory: ${{ steps.locate.outputs.project_dir }}
@@ -774,7 +851,7 @@ jobs:
           ./gradlew --version
 
       # ============================================================
-      # 24. GENERATE TEMPORARY SIGNING KEY
+      # 26. GENERATE TEMPORARY SIGNING KEY
       # ============================================================
       - name: Generate temporary signing key
         shell: bash
@@ -805,7 +882,7 @@ jobs:
           echo "Temporary CI signing key generated."
 
       # ============================================================
-      # 25. BUILD RELEASE APK
+      # 27. BUILD RELEASE APK
       # ============================================================
       - name: Build release APK
         id: build_apk
@@ -827,7 +904,7 @@ jobs:
             -print
 
       # ============================================================
-      # 26. LOCATE APK
+      # 28. LOCATE APK
       # ============================================================
       - name: Locate unsigned APK
         id: unsigned_apk
@@ -865,9 +942,60 @@ jobs:
           echo "apk=$APK" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 27. VERIFY REQUIRED NATIVE LIBRARIES ARE IN APK
+      # 29. VERIFY CONFIG IS INSIDE APK
       #
-      # This is the most important new APK-level check.
+      # This is the new critical APK-level config check.
+      # ============================================================
+      - name: Verify ycash.conf inside APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="${{ steps.unsigned_apk.outputs.apk }}"
+
+          test -f "$APK"
+
+          echo "=========================================="
+          echo "VERIFYING YCASH CONFIG INSIDE APK"
+          echo "=========================================="
+
+          if ! unzip -l "$APK" \
+              | grep -q 'assets/ycash/ycash.conf'; then
+            echo "::error::ycash.conf is missing from APK."
+            exit 1
+          fi
+
+          echo "ycash.conf FOUND inside APK."
+
+          echo
+          echo "===== APK config entry ====="
+
+          unzip -l "$APK" \
+            | grep 'assets/ycash/ycash.conf'
+
+          echo
+          echo "===== Extracting config for verification ====="
+
+          TEMP_CONFIG="$RUNNER_TEMP/ycash.conf"
+
+          rm -f "$TEMP_CONFIG"
+
+          unzip -p "$APK" \
+            'assets/ycash/ycash.conf' \
+            > "$TEMP_CONFIG"
+
+          test -s "$TEMP_CONFIG"
+
+          echo
+          echo "===== Packaged config contents ====="
+
+          cat "$TEMP_CONFIG"
+
+          echo
+          echo "Ycash configuration successfully packaged into APK."
+
+      # ============================================================
+      # 30. VERIFY REQUIRED NATIVE LIBRARIES ARE IN APK
       # ============================================================
       - name: Verify native libraries inside APK
         shell: bash
@@ -912,7 +1040,7 @@ jobs:
           echo "Both required ARM64 native libraries are inside the APK."
 
       # ============================================================
-      # 28. VERIFY LIBRARY COMPRESSION
+      # 31. VERIFY LIBRARY COMPRESSION
       # ============================================================
       - name: Verify native libraries are stored uncompressed
         shell: bash
@@ -942,7 +1070,7 @@ jobs:
           echo "these native libraries uncompressed."
 
       # ============================================================
-      # 29. ZIPALIGN APK
+      # 32. ZIPALIGN APK
       # ============================================================
       - name: Zipalign APK
         id: aligned
@@ -980,7 +1108,7 @@ jobs:
           echo "apk=$ALIGNED" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 30. SIGN FINAL APK
+      # 33. SIGN FINAL APK
       # ============================================================
       - name: Sign final APK with temporary CI key
         id: signed
@@ -1021,7 +1149,7 @@ jobs:
           echo "apk=$SIGNED" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 31. VERIFY APK SIGNATURE
+      # 34. VERIFY APK SIGNATURE
       # ============================================================
       - name: Verify final APK signature
         shell: bash
@@ -1045,7 +1173,7 @@ jobs:
           echo "===== APK VERIFIED ====="
 
       # ============================================================
-      # 32. VERIFY FINAL APK ALIGNMENT
+      # 35. VERIFY FINAL APK ALIGNMENT
       # ============================================================
       - name: Verify APK alignment
         shell: bash
@@ -1069,9 +1197,43 @@ jobs:
           echo "APK alignment verified."
 
       # ============================================================
-      # 33. FINAL APK NATIVE LIBRARY VERIFICATION
+      # 36. FINAL SIGNED APK CONFIG VERIFICATION
       #
-      # Repeat the critical check on the ACTUAL signed APK.
+      # Repeat the config check on the ACTUAL signed APK.
+      # ============================================================
+      - name: Verify final signed APK ycash.conf
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="${{ steps.signed.outputs.apk }}"
+
+          test -f "$APK"
+
+          echo "=========================================="
+          echo "FINAL SIGNED APK CONFIG VERIFICATION"
+          echo "=========================================="
+
+          if ! unzip -l "$APK" \
+              | grep -q 'assets/ycash/ycash.conf'; then
+            echo "::error::Final signed APK is missing ycash.conf."
+            exit 1
+          fi
+
+          echo "ycash.conf FOUND."
+
+          echo
+          echo "===== Final packaged config ====="
+
+          unzip -p "$APK" \
+            'assets/ycash/ycash.conf'
+
+          echo
+          echo
+          echo "Final signed APK contains ycash.conf."
+
+      # ============================================================
+      # 37. FINAL APK NATIVE LIBRARY VERIFICATION
       # ============================================================
       - name: Verify final signed APK native libraries
         shell: bash
@@ -1120,7 +1282,7 @@ jobs:
           echo "in the final signed ARM64 APK."
 
       # ============================================================
-      # 34. FINAL APK INSPECTION
+      # 38. FINAL APK INSPECTION
       # ============================================================
       - name: Inspect final APK
         shell: bash
@@ -1151,7 +1313,7 @@ jobs:
 
           unzip -l "$APK" \
             | grep -E \
-              'lib/arm64-v8a|AndroidManifest.xml' \
+              'lib/arm64-v8a|assets/ycash/ycash.conf|AndroidManifest.xml' \
             | head -100
 
           echo
@@ -1168,8 +1330,15 @@ jobs:
             | grep "libc++_shared.so" \
             || true
 
+          echo
+          echo "===== ycash.conf ====="
+
+          unzip -p "$APK" \
+            'assets/ycash/ycash.conf' \
+            || true
+
       # ============================================================
-      # 35. COPY FINAL APK TO WORKSPACE
+      # 39. COPY FINAL APK TO WORKSPACE
       # ============================================================
       - name: Prepare final APK artifact
         shell: bash
@@ -1192,7 +1361,7 @@ jobs:
           ls -lh "$OUT"
 
       # ============================================================
-      # 36. UPLOAD SIGNED ANDROID APK
+      # 40. UPLOAD SIGNED ANDROID APK
       # ============================================================
       - name: Upload signed Android APK
         uses: actions/upload-artifact@v4
@@ -1202,9 +1371,7 @@ jobs:
           if-no-files-found: error
 
       # ============================================================
-      # 37. UPLOAD YCASHD SEPARATELY
-      #
-      # This is the UNSTRIPPED binary for crash symbolisation.
+      # 41. UPLOAD YCASHD SEPARATELY
       # ============================================================
       - name: Upload ycashd ARM64 binary
         uses: actions/upload-artifact@v4
@@ -1214,7 +1381,7 @@ jobs:
           if-no-files-found: error
 
       # ============================================================
-      # 38. CREATE BUILD INFORMATION
+      # 42. CREATE BUILD INFORMATION
       # ============================================================
       - name: Create build information
         shell: bash
@@ -1267,11 +1434,24 @@ jobs:
           Native extraction:
           Required for exec of ycashd
 
+          Default configuration:
+          assets/ycash/ycash.conf
+
+          Configuration:
+          Packaged into APK
+
+          Configuration editing:
+          Android application should copy the packaged config
+          to its writable private node directory on first launch.
+
           APK signature:
           Verified with apksigner
 
           APK alignment:
           Verified with zipalign -c -p 4
+
+          Final config verification:
+          assets/ycash/ycash.conf PRESENT
 
           Final native-library verification:
           libycashd.so PRESENT
@@ -1281,7 +1461,7 @@ jobs:
           cat "$RUNNER_TEMP/ycash-build-info.txt"
 
       # ============================================================
-      # 39. UPLOAD BUILD INFORMATION
+      # 43. UPLOAD BUILD INFORMATION
       # ============================================================
       - name: Upload build information
         uses: actions/upload-artifact@v4
