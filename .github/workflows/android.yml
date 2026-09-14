@@ -94,7 +94,6 @@ jobs:
           fi
 
           PROJECT_DIR="$(dirname "$PROJECT")"
-
           PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
 
           echo "Android project: $PROJECT_DIR"
@@ -262,7 +261,6 @@ jobs:
           set -euo pipefail
 
           NDK="$ANDROID_HOME/ndk/$ANDROID_NDK"
-
           TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
           echo "NDK=$NDK"
@@ -391,7 +389,9 @@ jobs:
           unset PKG_CONFIG_PATH || true
 
           export CPPFLAGS="-I$VCPKG_INSTALLED/include"
-          export LDFLAGS="-L$VCPKG_INSTALLED/lib"
+
+          export CXXFLAGS="${CXXFLAGS:-} -stdlib=libc++"
+          export LDFLAGS="-L$VCPKG_INSTALLED/lib -stdlib=libc++ -shared-libc++ -fPIE -pie -llog"
 
           ./configure \
             --host=aarch64-linux-android \
@@ -442,15 +442,6 @@ jobs:
 
       # ============================================================
       # 17. PACKAGE YCASHD INTO JNI LIBS
-      #
-      # The binary is stripped on the way in. An unstripped ycashd is
-      # ~97 MB, nearly all of it DWARF debug data that the device will
-      # never read: it is carried in the APK, extracted at install and
-      # left on the phone's storage for nothing. Stripping typically
-      # takes it under 25 MB with identical behaviour.
-      #
-      # The unstripped original is still uploaded separately in step 30,
-      # so a crash can be symbolised against it later.
       # ============================================================
       - name: Package ycashd into Android application
         shell: bash
@@ -487,6 +478,124 @@ jobs:
 
           file "$JNI_DIR/libycashd.so"
 
+          ASSETS="$PROJECT/app/src/main/assets"
+          mkdir -p "$ASSETS"
+
+          {
+            echo "sha256=$(sha256sum "$JNI_DIR/libycashd.so" | cut -d' ' -f1)"
+            echo "bytes=$(stat -c%s "$JNI_DIR/libycashd.so")"
+            echo "run=${GITHUB_RUN_NUMBER:-local}"
+            echo "built=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > "$ASSETS/ycashd-build.txt"
+
+          echo "===== Build fingerprint ====="
+          cat "$ASSETS/ycashd-build.txt"
+
+      # ============================================================
+      # 17b. SHIP THE C++ RUNTIME ALONGSIDE YCASHD
+      # ============================================================
+      - name: Package libc++_shared.so
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT="${{ steps.locate.outputs.project_dir }}"
+          JNI_DIR="$PROJECT/app/src/main/jniLibs/arm64-v8a"
+
+          NDK="$ANDROID_NDK_HOME"
+
+          LIBCXX="$(find "$NDK/toolchains/llvm/prebuilt/linux-x86_64" \
+            -type f \
+            -name 'libc++_shared.so' \
+            -path '*aarch64-linux-android*' \
+            -print -quit || true)"
+
+          if [ -z "$LIBCXX" ] || [ ! -f "$LIBCXX" ]; then
+            echo "::error::libc++_shared.so was not found in the selected NDK."
+
+            find "$NDK/toolchains/llvm/prebuilt/linux-x86_64" \
+              -type f \
+              -name 'libc++_shared.so' \
+              -print || true
+
+            exit 1
+          fi
+
+          mkdir -p "$JNI_DIR"
+
+          rm -f "$JNI_DIR/libc++_shared.so"
+
+          cp "$LIBCXX" "$JNI_DIR/libc++_shared.so"
+
+          chmod 755 "$JNI_DIR/libc++_shared.so"
+
+          echo "===== libc++_shared.so ====="
+          ls -lh "$JNI_DIR/libc++_shared.so"
+          file "$JNI_DIR/libc++_shared.so"
+
+      # ============================================================
+      # 17c. CONFIRM EVERY SHARED DEPENDENCY IS SATISFIED
+      # ============================================================
+      - name: Verify shared library dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT="${{ steps.locate.outputs.project_dir }}"
+
+          JNI_DIR="$PROJECT/app/src/main/jniLibs/arm64-v8a"
+
+          TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+          READELF="$TOOLCHAIN/llvm-readelf"
+
+          echo "===== ycashd DT_NEEDED ====="
+
+          "$READELF" -d "$JNI_DIR/libycashd.so" | grep NEEDED || true
+
+          if ! "$READELF" -d "$JNI_DIR/libycashd.so" | grep -q 'libc++_shared.so'; then
+            echo "::error::ycashd does not declare libc++_shared.so in DT_NEEDED."
+            echo "The binary was not linked with the intended shared NDK libc++."
+            exit 1
+          fi
+
+          test -s "$JNI_DIR/libc++_shared.so"
+
+          echo "libc++_shared.so is staged beside ycashd."
+
+          PLATFORM="libc.so libm.so libdl.so liblog.so libz.so"
+
+          MISSING=0
+
+          while read -r NEED; do
+            [ -z "$NEED" ] && continue
+
+            if echo "$PLATFORM" | grep -qw "$NEED"; then
+              echo "  $NEED -- provided by Android"
+
+            elif [ -f "$JNI_DIR/$NEED" ]; then
+              echo "  $NEED -- shipped in jniLibs"
+
+            else
+              echo "::error::$NEED is required but neither provided by Android nor shipped."
+
+              MISSING=1
+            fi
+
+          done < <(
+            "$READELF" -d "$JNI_DIR/libycashd.so" |
+            grep NEEDED |
+            sed -E 's/.*\[(.*)\].*/\1/'
+          )
+
+          if [ "$MISSING" -ne 0 ]; then
+            echo "Contents of $JNI_DIR:"
+            ls -lh "$JNI_DIR"
+            exit 1
+          fi
+
+          echo "All ycashd shared dependencies are satisfied."
+
       # ============================================================
       # 18. VERIFY PACKAGED YCASHD
       # ============================================================
@@ -503,27 +612,20 @@ jobs:
           test -x "$DAEMON"
 
           echo "===== ycashd ELF header ====="
+
           file "$DAEMON"
 
-          # Executing it from nativeLibraryDir only works if it is a PIE
-          # executable; a plain ELF will be refused by the linker on modern
-          # Android. Fail here rather than at first launch on the device.
           if ! file "$DAEMON" | grep -q "pie executable"; then
             echo "::error::ycashd is not a PIE executable; Android will refuse to run it."
             exit 1
           fi
 
           echo "===== ycashd permissions ====="
+
           ls -l "$DAEMON"
 
       # ============================================================
       # 19. CONFIRM NATIVE LIBRARY PACKAGING
-      #
-      # ycashd is exec'd from nativeLibraryDir, which requires the file
-      # to exist on disk after install. If extractNativeLibs is false or
-      # useLegacyPackaging is unset, Android keeps it compressed inside
-      # the APK and there is nothing to exec -- the build passes and the
-      # app fails at launch, which is a slow way to find out.
       # ============================================================
       - name: Confirm native library packaging
         working-directory: ${{ steps.locate.outputs.project_dir }}
@@ -637,6 +739,32 @@ jobs:
             -type f \
             -name '*.apk' \
             -print
+
+          APK="$(
+            find "$PWD/app/build/outputs/apk" \
+              -type f \
+              -name '*.apk' \
+              -print -quit
+          )"
+
+          test -n "$APK"
+
+          echo "===== PRE-SIGN NATIVE RUNTIME CHECK ====="
+
+          if ! unzip -l "$APK" | grep -q 'lib/arm64-v8a/libycashd.so'; then
+            echo "::error::libycashd.so is missing from the unsigned APK."
+            unzip -l "$APK" | grep 'lib/' || true
+            exit 1
+          fi
+
+          if ! unzip -l "$APK" | grep -q 'lib/arm64-v8a/libc++_shared.so'; then
+            echo "::error::libc++_shared.so is missing from the unsigned APK."
+            echo "The CI staging directory contained it, but Gradle did not package it."
+            unzip -l "$APK" | grep 'lib/' || true
+            exit 1
+          fi
+
+          echo "Both ARM64 native libraries are present in the APK."
 
       # ============================================================
       # 23. LOCATE APK AND CONVERT TO ABSOLUTE PATH
@@ -782,15 +910,16 @@ jobs:
       # ============================================================
       # 27. VERIFY APK ZIP ALIGNMENT
       #
-      # THE FIX: this step previously ran `zipalign -c -P 4 "$APK"`.
-      # Uppercase -P takes a page-size argument, so it consumed the 4;
-      # "$APK" was then read as the <align> value and there was no input
-      # file left, which is why zipalign printed its usage and exited 2.
-      # Nothing was wrong with the APK -- the check was asking the
-      # question incorrectly.
+      # IMPORTANT:
+      # Use lowercase -p here. The previous workflow used:
       #
-      # Lowercase -p is a flag (4 KB page-align uncompressed .so files),
-      # matching exactly how step 24 aligned the file.
+      #   zipalign -c -P 4 "$APK"
+      #
+      # Uppercase -P consumes the 4 as a page-size argument and leaves
+      # the command with an invalid argument layout.
+      #
+      # This workflow uses the same lowercase -p flag used when the APK
+      # was aligned in step 24.
       # ============================================================
       - name: Verify APK alignment
         shell: bash
@@ -848,17 +977,52 @@ jobs:
               'lib/arm64-v8a|AndroidManifest.xml' \
             | head -100
 
-          # Stored (not Deflated) is what proves the daemon will be
-          # extracted to disk rather than left compressed in the APK.
           echo
-          echo "ycashd compression method:"
-          unzip -v "$APK" | grep "libycashd.so" || true
+          echo "Native library compression (Stored = extractable):"
+
+          unzip -v "$APK" \
+            | grep -E "libycashd.so|libc\+\+_shared.so" || true
+
+          if ! unzip -l "$APK" | grep -q "lib/arm64-v8a/libycashd.so"; then
+            echo "::error::libycashd.so is missing from the APK."
+            unzip -l "$APK" | grep "lib/" || true
+            exit 1
+          fi
+
+          echo "libycashd.so is present in the APK."
+
+          if ! unzip -l "$APK" | grep -q "lib/arm64-v8a/libc++_shared.so"; then
+            echo "::error::libc++_shared.so is missing from the final APK."
+            exit 1
+          fi
+
+          echo "libc++_shared.so is present in the final APK."
+
+          echo
+          echo "===== Native library entries ====="
+
+          unzip -l "$APK" |
+            grep -E \
+              'lib/arm64-v8a/(libycashd\.so|libc\+\+_shared\.so)$'
+
+          for NAME in libycashd.so libc++_shared.so; do
+            if ! unzip -v "$APK" |
+              grep -E "lib/arm64-v8a/${NAME}$" |
+              grep -q '^[[:space:]]*[0-9].* Stored '; then
+
+              echo "::error::$NAME is not stored uncompressed in the APK."
+
+              unzip -v "$APK" |
+                grep "lib/arm64-v8a/${NAME}" || true
+
+              exit 1
+            fi
+          done
+
+          echo "Both native libraries are stored uncompressed and extractable."
 
       # ============================================================
       # 29. COPY FINAL APK TO WORKSPACE
-      #
-      # This gives upload-artifact a stable workspace path instead
-      # of relying on RUNNER_TEMP.
       # ============================================================
       - name: Prepare final APK artifact
         shell: bash
@@ -892,9 +1056,6 @@ jobs:
 
       # ============================================================
       # 31. UPLOAD YCASHD SEPARATELY
-      #
-      # This is the UNSTRIPPED binary, kept so a crash from the shipped
-      # (stripped) daemon can still be symbolised.
       # ============================================================
       - name: Upload ycashd ARM64 binary
         uses: actions/upload-artifact@v4
