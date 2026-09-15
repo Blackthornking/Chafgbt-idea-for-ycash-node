@@ -47,20 +47,7 @@ jobs:
       #
       # OR
       #
-      # B) Repository contains ANY ZIP file containing the
-      #    Ycash Android Node project.
-      #
-      # ZIP filename does NOT matter.
-      #
-      # The workflow searches ALL .zip files recursively and
-      # identifies a valid project by checking for:
-      #
-      #    Cargo.toml
-      #    crates/
-      #    android-app/
-      #
-      # The project may also be inside a nested directory in
-      # the ZIP.
+      # B) Repository contains ANY ZIP containing the project.
       # =========================================================
       - name: Prepare project root
         shell: bash
@@ -68,43 +55,29 @@ jobs:
           set -euo pipefail
 
           echo "=========================================="
-          echo "PREPARING Ycash PROJECT ROOT"
+          echo "PREPARING YCASH PROJECT ROOT"
           echo "=========================================="
 
-          echo
-          echo "Current repository:"
           pwd
 
           echo
           echo "Repository contents:"
           ls -la
 
-          # -----------------------------------------------------
-          # Already at repository root?
-          # -----------------------------------------------------
           if [ -f "Cargo.toml" ] && \
              [ -d "crates" ] && \
              [ -d "android-app" ]; then
 
             echo
             echo "Valid Ycash project already exists at repository root."
-            echo "Using existing project."
 
           else
 
             echo
-            echo "Valid project not found at repository root."
-            echo
-            echo "Searching ALL ZIP files recursively..."
-            echo "ZIP filename is ignored."
+            echo "Searching all ZIP files recursively..."
 
             ZIP=""
 
-            # ---------------------------------------------------
-            # Find every ZIP recursively.
-            #
-            # No filename pattern is required.
-            # ---------------------------------------------------
             mapfile -d '' ZIP_FILES < <(
               find . \
                 -type f \
@@ -115,158 +88,67 @@ jobs:
             )
 
             if [ "${#ZIP_FILES[@]}" -eq 0 ]; then
-              echo
-              echo "ERROR: No ZIP files were found."
-              echo
-              echo "Repository files:"
-              find . -maxdepth 6 -type f | sort
+              echo "ERROR: No ZIP files found."
               exit 1
             fi
 
             echo
             echo "ZIP files discovered:"
+
             for candidate in "${ZIP_FILES[@]}"; do
               echo "  - $candidate"
             done
 
-            # ---------------------------------------------------
-            # Test every ZIP.
-            #
-            # A ZIP is considered a candidate when it contains:
-            #
-            #    Cargo.toml
-            #
-            # and either:
-            #
-            #    crates/
-            #
-            # and:
-            #
-            #    android-app/
-            #
-            # This works whether those files are at ZIP root or
-            # inside a nested project directory.
-            # ---------------------------------------------------
-
             for candidate in "${ZIP_FILES[@]}"; do
 
               echo
               echo "------------------------------------------"
-              echo "Checking ZIP:"
+              echo "Checking:"
               echo "$candidate"
               echo "------------------------------------------"
 
-              # -------------------------------------------------
-              # Verify ZIP is readable.
-              # -------------------------------------------------
               if ! unzip -tq "$candidate" >/dev/null 2>&1; then
-                echo "SKIP: Invalid or corrupted ZIP."
+                echo "SKIP: Invalid/corrupted ZIP."
                 continue
               fi
 
-              echo "ZIP integrity: OK"
-
-              # -------------------------------------------------
-              # Check for Cargo.toml.
-              # -------------------------------------------------
               if ! unzip -Z1 "$candidate" 2>/dev/null \
                 | grep -qE '(^|/)Cargo\.toml$'; then
-
                 echo "SKIP: No Cargo.toml."
                 continue
               fi
 
-              echo "Cargo.toml: FOUND"
-
-              # -------------------------------------------------
-              # Check for crates directory/content.
-              #
-              # ZIP listings sometimes do not contain explicit
-              # directory entries, so also accept files below
-              # crates/.
-              # -------------------------------------------------
               if ! unzip -Z1 "$candidate" 2>/dev/null \
                 | grep -qE '(^|/)crates(/|/)'; then
-
-                echo "SKIP: No crates/ directory."
+                echo "SKIP: No crates/."
                 continue
               fi
 
-              echo "crates/: FOUND"
-
-              # -------------------------------------------------
-              # Check for android-app directory/content.
-              # -------------------------------------------------
               if ! unzip -Z1 "$candidate" 2>/dev/null \
                 | grep -qE '(^|/)android-app(/|/)'; then
-
-                echo "SKIP: No android-app/ directory."
+                echo "SKIP: No android-app/."
                 continue
               fi
 
-              echo "android-app/: FOUND"
-
-              # -------------------------------------------------
-              # Valid project ZIP found.
-              # -------------------------------------------------
               ZIP="$candidate"
 
               echo
-              echo "=========================================="
-              echo "VALID YCASH PROJECT ZIP FOUND"
-              echo "=========================================="
+              echo "VALID PROJECT ZIP FOUND:"
               echo "$ZIP"
 
               break
             done
 
-            # ---------------------------------------------------
-            # No valid ZIP found.
-            # ---------------------------------------------------
             if [ -z "$ZIP" ]; then
-
               echo
-              echo "=========================================="
-              echo "ERROR: NO VALID YCASH PROJECT ZIP"
-              echo "=========================================="
-
-              echo
-              echo "ZIP files that were checked:"
-
-              for candidate in "${ZIP_FILES[@]}"; do
-                echo "  - $candidate"
-              done
-
-              echo
-              echo "Repository files:"
-              find . -maxdepth 6 -type f | sort
-
+              echo "ERROR: No valid Ycash project ZIP found."
               exit 1
             fi
 
-            # ---------------------------------------------------
-            # Extract selected project.
-            # ---------------------------------------------------
             rm -rf .ycash-project
             mkdir -p .ycash-project
 
-            echo
-            echo "=========================================="
-            echo "EXTRACTING SELECTED PROJECT"
-            echo "=========================================="
-
-            echo "ZIP:"
-            echo "$ZIP"
-
             unzip -q "$ZIP" -d .ycash-project
-
-            # ---------------------------------------------------
-            # Locate the project directory.
-            #
-            # We search for Cargo.toml and then walk upward
-            # looking for the directory containing the required
-            # project structure.
-            # ---------------------------------------------------
 
             PROJECT_ROOT=""
 
@@ -274,16 +156,13 @@ jobs:
 
               candidate_root="$(dirname "$cargo_file")"
 
-              echo
-              echo "Checking extracted Cargo project:"
-              echo "$candidate_root"
-
               if [ -d "$candidate_root/crates" ] && \
                  [ -d "$candidate_root/android-app" ]; then
 
                 PROJECT_ROOT="$candidate_root"
 
-                echo "Valid project root found:"
+                echo
+                echo "PROJECT ROOT:"
                 echo "$PROJECT_ROOT"
 
                 break
@@ -296,36 +175,12 @@ jobs:
                 -print0
             )
 
-            # ---------------------------------------------------
-            # Safety check.
-            # ---------------------------------------------------
             if [ -z "$PROJECT_ROOT" ]; then
-
               echo
-              echo "ERROR: ZIP contained Cargo.toml but no valid"
-              echo "Ycash project structure was found."
-
-              echo
-              echo "Expected:"
-              echo "  Cargo.toml"
-              echo "  crates/"
-              echo "  android-app/"
-
-              echo
-              echo "Extracted files:"
-              find .ycash-project \
-                -maxdepth 8 \
-                -type f \
-                | sort
-
+              echo "ERROR: Could not locate valid project root."
+              find .ycash-project -maxdepth 8 -type f | sort
               exit 1
             fi
-
-            # ---------------------------------------------------
-            # Copy project to GitHub repository root.
-            # ---------------------------------------------------
-            echo
-            echo "Copying project to repository root..."
 
             cp -a "$PROJECT_ROOT"/. .
 
@@ -333,23 +188,10 @@ jobs:
 
           fi
 
-          # =====================================================
-          # FINAL PROJECT ROOT VERIFICATION
-          # =====================================================
-
           echo
           echo "=========================================="
-          echo "FINAL PROJECT ROOT"
+          echo "FINAL PROJECT ROOT CHECK"
           echo "=========================================="
-
-          pwd
-
-          echo
-          echo "Root contents:"
-          ls -la
-
-          echo
-          echo "Checking required files..."
 
           test -f Cargo.toml
           test -d crates
@@ -360,27 +202,15 @@ jobs:
           ls -lh Cargo.toml
 
           echo
-          echo "Project directories:"
+          echo "Required directories:"
 
-          for dir in \
-            crates \
-            android-app \
-            cpp \
-            tests \
-            tools \
-            .github
-          do
-            if [ -d "$dir" ]; then
-              echo "  OK: $dir/"
-            else
-              echo "  NOTE: $dir/ not present"
-            fi
+          for dir in crates android-app; do
+            test -d "$dir"
+            echo "OK: $dir/"
           done
 
           echo
-          echo "=========================================="
           echo "PROJECT ROOT READY"
-          echo "=========================================="
 
       # =========================================================
       # 3. JAVA 17
@@ -437,15 +267,10 @@ jobs:
           NDK="$ANDROID_HOME/ndk/${ANDROID_NDK}"
           LLVM="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
-          echo "NDK:"
-          echo "$NDK"
-
-          echo
-          echo "LLVM:"
-          echo "$LLVM"
-
           test -x "$LLVM/aarch64-linux-android${ANDROID_API}-clang"
+          test -x "$LLVM/aarch64-linux-android${ANDROID_API}-clang++"
           test -x "$LLVM/llvm-ar"
+          test -x "$LLVM/llvm-ranlib"
 
           mkdir -p .cargo
 
@@ -455,14 +280,14 @@ jobs:
           ar = "$LLVM/llvm-ar"
           EOF
 
-          echo
-          echo "Cargo Android linker configuration:"
-          cat .cargo/config.toml
-
           echo "CC_aarch64_linux_android=$LLVM/aarch64-linux-android${ANDROID_API}-clang" >> "$GITHUB_ENV"
           echo "CXX_aarch64_linux_android=$LLVM/aarch64-linux-android${ANDROID_API}-clang++" >> "$GITHUB_ENV"
           echo "AR_aarch64_linux_android=$LLVM/llvm-ar" >> "$GITHUB_ENV"
           echo "RANLIB_aarch64_linux_android=$LLVM/llvm-ranlib" >> "$GITHUB_ENV"
+
+          echo
+          echo "Cargo configuration:"
+          cat .cargo/config.toml
 
       # =========================================================
       # 8. VERIFY RUST WORKSPACE
@@ -472,15 +297,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Rust version:"
           rustc --version
-
-          echo
-          echo "Cargo version:"
           cargo --version
-
-          echo
-          echo "Checking Cargo workspace..."
 
           test -f Cargo.toml
 
@@ -521,8 +339,12 @@ jobs:
 
       # =========================================================
       # 11. VERIFY ARM64 NODE
+      #
+      # IMPORTANT:
+      # The node is an Android ARM64 PIE executable.
+      # It is NOT treated as a normal desktop Linux executable.
       # =========================================================
-      - name: Verify ARM64 node binary
+      - name: Verify ARM64 Android node
         shell: bash
         run: |
           set -euo pipefail
@@ -532,48 +354,141 @@ jobs:
           test -f "$NODE"
           test -x "$NODE"
 
-          echo "Node binary:"
+          echo "=========================================="
+          echo "NODE BINARY"
+          echo "=========================================="
+
           ls -lh "$NODE"
 
           echo
-          echo "File type:"
+          echo "File:"
           file "$NODE"
 
           echo
-          echo "ELF information:"
+          echo "ELF header:"
           readelf -h "$NODE" | grep -E \
             "Class:|Machine:|Type:"
+
+          echo
+          echo "Program headers:"
+          readelf -l "$NODE" | grep -E \
+            "Type|INTERP|GNU_STACK|GNU_RELRO" || true
 
           echo
           echo "Native dependencies:"
           readelf -d "$NODE" | grep NEEDED || true
 
+          echo
+          echo "SHA-256:"
+          sha256sum "$NODE"
+
+          # -----------------------------------------------------
+          # Must be 64-bit ARM.
+          # -----------------------------------------------------
+          file "$NODE" | grep -Ei \
+            "ARM aarch64|ARM64|aarch64"
+
+          # -----------------------------------------------------
+          # Must be PIE executable.
+          # ET_DYN is expected for Android PIE executables.
+          # -----------------------------------------------------
+          readelf -h "$NODE" | grep -q \
+            "Type:[[:space:]]*DYN"
+
+          echo
+          echo "ARM64 + PIE verification PASSED."
+
       # =========================================================
-      # 12. BUNDLE EXACT RUST NODE INTO APK ASSETS
+      # 12. PREPARE ANDROID NATIVE LIBRARY DIRECTORY
+      #
+      # Android extracts native libraries into:
+      #
+      #    ApplicationInfo.nativeLibraryDir
+      #
+      # The Android runtime code can therefore execute the
+      # bundled node from the extracted native-library path
+      # rather than trying to execute directly from assets.
       # =========================================================
-      - name: Bundle Rust node into Android app
+      - name: Prepare Android ARM64 native node
         shell: bash
         run: |
           set -euo pipefail
 
           NODE="target/${RUST_TARGET}/release/ycash-android-node"
-          ASSETS="android-app/app/src/main/assets"
 
-          mkdir -p "$ASSETS"
+          JNI_LIBS="android-app/app/src/main/jniLibs/arm64-v8a"
+          NATIVE_NODE="$JNI_LIBS/libycashandroidnode.so"
 
-          rm -f "$ASSETS/ycash-android-node"
+          mkdir -p "$JNI_LIBS"
 
-          cp "$NODE" "$ASSETS/ycash-android-node"
+          # Remove legacy asset executable.
+          rm -f \
+            android-app/app/src/main/assets/ycash-android-node
 
-          chmod 755 "$ASSETS/ycash-android-node"
+          # Remove stale native copy.
+          rm -f "$NATIVE_NODE"
 
-          test -f "$ASSETS/ycash-android-node"
+          cp "$NODE" "$NATIVE_NODE"
 
-          echo "Bundled node:"
-          ls -lh "$ASSETS/ycash-android-node"
+          chmod 755 "$NATIVE_NODE"
+
+          test -f "$NATIVE_NODE"
+
+          echo "Native node:"
+          ls -lh "$NATIVE_NODE"
+
+          echo
+          echo "Native node type:"
+          file "$NATIVE_NODE"
+
+          echo
+          echo "Native node SHA-256:"
+          sha256sum "$NATIVE_NODE"
+
+          echo
+          echo "Native node prepared."
 
       # =========================================================
-      # 13. VERIFY ANDROID PROJECT
+      # 13. VERIFY NO LEGACY ASSET NODE
+      # =========================================================
+      - name: Verify legacy asset node is absent
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -f \
+            android-app/app/src/main/assets/ycash-android-node
+          ]; then
+
+            echo "ERROR: Legacy asset node still exists."
+            exit 1
+          fi
+
+          echo "Legacy asset node correctly absent."
+
+      # =========================================================
+      # 14. VERIFY ANDROID NATIVE NODE
+      # =========================================================
+      - name: Verify Android native node
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          NODE="android-app/app/src/main/jniLibs/arm64-v8a/libycashandroidnode.so"
+
+          test -f "$NODE"
+
+          file "$NODE" | grep -Ei \
+            "ARM aarch64|ARM64|aarch64"
+
+          readelf -h "$NODE" | grep -q \
+            "Type:[[:space:]]*DYN"
+
+          echo
+          echo "Android ARM64 native node verification PASSED."
+
+      # =========================================================
+      # 15. VERIFY ANDROID PROJECT
       # =========================================================
       - name: Verify Android project
         shell: bash
@@ -583,12 +498,52 @@ jobs:
           test -f android-app/settings.gradle
           test -f android-app/app/build.gradle
           test -f android-app/app/src/main/AndroidManifest.xml
-          test -f android-app/app/src/main/assets/ycash-android-node
 
+          test -f \
+            android-app/app/src/main/jniLibs/arm64-v8a/libycashandroidnode.so
+
+          echo
           echo "Android project verified."
 
       # =========================================================
-      # 14. GRADLE
+      # 16. CHECK ANDROID MANIFEST
+      #
+      # extractNativeLibs=false can prevent extraction on
+      # supported configurations, which would break the
+      # executable-from-nativeLibraryDir approach.
+      #
+      # We therefore fail if the manifest explicitly disables
+      # extraction.
+      # =========================================================
+      - name: Verify native library extraction configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MANIFEST="android-app/app/src/main/AndroidManifest.xml"
+
+          test -f "$MANIFEST"
+
+          if grep -Eq \
+            'extractNativeLibs[[:space:]]*=[[:space:]]*"false"' \
+            "$MANIFEST"; then
+
+            echo
+            echo "ERROR:"
+            echo "AndroidManifest.xml explicitly sets"
+            echo "extractNativeLibs=\"false\"."
+            echo
+            echo "The node execution design requires the native"
+            echo "library to be extracted into nativeLibraryDir."
+
+            exit 1
+          fi
+
+          echo
+          echo "Native library extraction configuration OK."
+
+      # =========================================================
+      # 17. SET UP GRADLE
       # =========================================================
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -596,9 +551,9 @@ jobs:
           gradle-version: "8.9"
 
       # =========================================================
-      # 15. BUILD APK
+      # 18. BUILD APK
       # =========================================================
-      - name: Build Android APK with Gradle
+      - name: Build Android APK
         working-directory: android-app
         shell: bash
         run: |
@@ -610,7 +565,7 @@ jobs:
             assembleDebug
 
       # =========================================================
-      # 16. LOCATE GRADLE APK
+      # 19. LOCATE APK
       # =========================================================
       - name: Locate Gradle APK
         id: locate_apk
@@ -624,29 +579,94 @@ jobs:
 
           echo "apk=$APK" >> "$GITHUB_OUTPUT"
 
-          echo "Gradle APK:"
+          echo
+          echo "APK:"
           ls -lh "$APK"
 
       # =========================================================
-      # 17. VERIFY BUNDLED RUST NODE
+      # 20. VERIFY NATIVE NODE INSIDE APK
       # =========================================================
-      - name: Verify native node in Gradle APK
+      - name: Verify ARM64 native node in APK
         shell: bash
         run: |
           set -euo pipefail
 
           APK="${{ steps.locate_apk.outputs.apk }}"
 
-          echo "Checking bundled Rust node..."
+          echo "=========================================="
+          echo "APK NATIVE NODE CHECK"
+          echo "=========================================="
 
-          unzip -l "$APK" | grep \
-            "assets/ycash-android-node"
+          unzip -l "$APK" \
+            | grep \
+            "lib/arm64-v8a/libycashandroidnode.so"
 
           echo
-          echo "Required bundled files are present."
+          echo "Checking for legacy asset executable..."
+
+          if unzip -l "$APK" \
+            | grep -q "assets/ycash-android-node"; then
+
+            echo
+            echo "ERROR:"
+            echo "Legacy assets/ycash-android-node exists in APK."
+
+            exit 1
+          fi
+
+          echo
+          echo "Native node packaging PASSED."
 
       # =========================================================
-      # 18. GENERATE TEMPORARY DEBUG KEY
+      # 21. EXTRACT AND VERIFY APK NATIVE NODE
+      #
+      # This checks the actual ELF stored in the APK.
+      # =========================================================
+      - name: Extract and verify APK native node
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="${{ steps.locate_apk.outputs.apk }}"
+
+          rm -rf apk-native-check
+          mkdir -p apk-native-check
+
+          unzip -q "$APK" \
+            "lib/arm64-v8a/libycashandroidnode.so" \
+            -d apk-native-check
+
+          NODE="apk-native-check/lib/arm64-v8a/libycashandroidnode.so"
+
+          test -f "$NODE"
+
+          echo "Extracted APK node:"
+          ls -lh "$NODE"
+
+          echo
+          echo "File:"
+          file "$NODE"
+
+          echo
+          echo "ELF:"
+          readelf -h "$NODE" | grep -E \
+            "Class:|Machine:|Type:"
+
+          echo
+          echo "SHA-256:"
+          sha256sum "$NODE"
+
+          file "$NODE" | grep -Ei \
+            "ARM aarch64|ARM64|aarch64"
+
+          readelf -h "$NODE" | grep -q \
+            "Type:[[:space:]]*DYN"
+
+          echo
+          echo "APK native node verification PASSED."
+
+      # =========================================================
+      # 22. GENERATE TEMPORARY DEBUG KEY
       # =========================================================
       - name: Generate temporary debug signing key
         shell: bash
@@ -674,7 +694,7 @@ jobs:
           echo "Temporary CI signing key generated."
 
       # =========================================================
-      # 19. ZIPALIGN
+      # 23. ZIPALIGN
       # =========================================================
       - name: Zipalign APK
         shell: bash
@@ -682,6 +702,7 @@ jobs:
           set -euo pipefail
 
           INPUT="android-app/app/build/outputs/apk/debug/app-debug.apk"
+
           ALIGNED="android-app/app/build/outputs/apk/debug/ycash-android-node-aligned.apk"
 
           ZIPALIGN="$ANDROID_HOME/build-tools/35.0.0/zipalign"
@@ -700,11 +721,12 @@ jobs:
 
           test -f "$ALIGNED"
 
+          echo
           echo "Aligned APK:"
           ls -lh "$ALIGNED"
 
       # =========================================================
-      # 20. VERIFY ZIPALIGN
+      # 24. VERIFY ZIPALIGN
       # =========================================================
       - name: Verify zip alignment
         shell: bash
@@ -722,8 +744,11 @@ jobs:
             4 \
             "$ALIGNED"
 
+          echo
+          echo "Zip alignment verification PASSED."
+
       # =========================================================
-      # 21. SIGN ALIGNED APK
+      # 25. SIGN ALIGNED APK
       # =========================================================
       - name: Sign aligned APK
         shell: bash
@@ -756,7 +781,7 @@ jobs:
           ls -lh "$SIGNED"
 
       # =========================================================
-      # 22. VERIFY APK SIGNATURE
+      # 26. VERIFY APK SIGNATURE
       # =========================================================
       - name: Verify APK signature
         shell: bash
@@ -772,30 +797,39 @@ jobs:
             "$SIGNED"
 
           echo
-          echo "APK signature verification passed."
+          echo "APK signature verification PASSED."
 
       # =========================================================
-      # 23. VERIFY FINAL APK CONTENTS
+      # 27. VERIFY FINAL APK NATIVE NODE
       # =========================================================
-      - name: Verify final signed APK contents
+      - name: Verify final signed APK native node
         shell: bash
         run: |
           set -euo pipefail
 
           SIGNED="android-app/app/build/outputs/apk/debug/ycash-android-node-debug-signed.apk"
 
-          echo "Checking final APK..."
+          echo "=========================================="
+          echo "FINAL SIGNED APK CHECK"
+          echo "=========================================="
+
+          unzip -l "$SIGNED" \
+            | grep \
+            "lib/arm64-v8a/libycashandroidnode.so"
+
+          if unzip -l "$SIGNED" \
+            | grep -q "assets/ycash-android-node"; then
+
+            echo
+            echo "ERROR: Legacy asset node found."
+            exit 1
+          fi
 
           echo
-          echo "Rust node:"
-          unzip -l "$SIGNED" | grep \
-            "assets/ycash-android-node"
-
-          echo
-          echo "Final APK contents verified."
+          echo "Final native node packaging PASSED."
 
       # =========================================================
-      # 24. FINAL APK INFORMATION
+      # 28. FINAL APK INFORMATION
       # =========================================================
       - name: Display final APK information
         shell: bash
@@ -804,6 +838,7 @@ jobs:
 
           SIGNED="android-app/app/build/outputs/apk/debug/ycash-android-node-debug-signed.apk"
 
+          echo
           echo "=========================================="
           echo "FINAL APK"
           echo "=========================================="
@@ -814,8 +849,13 @@ jobs:
           echo "SHA-256:"
           sha256sum "$SIGNED"
 
+          echo
+          echo "=========================================="
+          echo "BUILD VERIFICATION COMPLETE"
+          echo "=========================================="
+
       # =========================================================
-      # 25. UPLOAD SIGNED APK
+      # 29. UPLOAD SIGNED APK
       # =========================================================
       - name: Upload signed debug APK
         uses: actions/upload-artifact@v4
@@ -825,7 +865,7 @@ jobs:
           if-no-files-found: error
 
       # =========================================================
-      # 26. UPLOAD RAW ARM64 NODE
+      # 30. UPLOAD RAW ARM64 NODE
       # =========================================================
       - name: Upload ARM64 node
         uses: actions/upload-artifact@v4
@@ -835,7 +875,110 @@ jobs:
           if-no-files-found: error
 
       # =========================================================
-      # 27. CLEAN TEMPORARY SIGNING KEY
+      # 31. UPLOAD BUILD DIAGNOSTICS
+      # =========================================================
+      - name: Create build diagnostics
+        if: always()
+        shell: bash
+        run: |
+          set +e
+
+          mkdir -p build-diagnostics
+
+          echo "==========================================" \
+            > build-diagnostics/summary.txt
+
+          echo "YCASH ANDROID NODE BUILD DIAGNOSTICS" \
+            >> build-diagnostics/summary.txt
+
+          echo "==========================================" \
+            >> build-diagnostics/summary.txt
+
+          echo >> build-diagnostics/summary.txt
+
+          echo "Date:" >> build-diagnostics/summary.txt
+          date -u >> build-diagnostics/summary.txt
+
+          echo >> build-diagnostics/summary.txt
+
+          echo "Rust:" >> build-diagnostics/summary.txt
+          rustc --version >> build-diagnostics/summary.txt 2>&1
+
+          echo >> build-diagnostics/summary.txt
+
+          echo "Cargo:" >> build-diagnostics/summary.txt
+          cargo --version >> build-diagnostics/summary.txt 2>&1
+
+          echo >> build-diagnostics/summary.txt
+
+          echo "Android API:" >> build-diagnostics/summary.txt
+          echo "$ANDROID_API" >> build-diagnostics/summary.txt
+
+          echo >> build-diagnostics/summary.txt
+
+          echo "Android NDK:" >> build-diagnostics/summary.txt
+          echo "$ANDROID_NDK" >> build-diagnostics/summary.txt
+
+          echo >> build-diagnostics/summary.txt
+
+          echo "Rust target:" >> build-diagnostics/summary.txt
+          echo "$RUST_TARGET" >> build-diagnostics/summary.txt
+
+          echo >> build-diagnostics/summary.txt
+
+          echo "Native node location:" \
+            >> build-diagnostics/summary.txt
+
+          echo \
+            "android-app/app/src/main/jniLibs/arm64-v8a/libycashandroidnode.so" \
+            >> build-diagnostics/summary.txt
+
+          echo >> build-diagnostics/summary.txt
+
+          echo "Node files:" >> build-diagnostics/summary.txt
+
+          find \
+            android-app/app/src/main/jniLibs \
+            -type f \
+            -print \
+            2>/dev/null \
+            >> build-diagnostics/summary.txt
+
+          echo >> build-diagnostics/summary.txt
+
+          echo "APK files:" >> build-diagnostics/summary.txt
+
+          find \
+            android-app/app/build/outputs \
+            -type f \
+            -print \
+            2>/dev/null \
+            >> build-diagnostics/summary.txt
+
+          echo >> build-diagnostics/summary.txt
+
+          echo "Repository Git status:" \
+            >> build-diagnostics/summary.txt
+
+          git status --short \
+            >> build-diagnostics/summary.txt 2>&1
+
+          echo
+          cat build-diagnostics/summary.txt
+
+      # =========================================================
+      # 32. UPLOAD BUILD DIAGNOSTICS
+      # =========================================================
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ycash-android-node-build-diagnostics
+          path: build-diagnostics
+          if-no-files-found: warn
+
+      # =========================================================
+      # 33. CLEAN TEMPORARY SIGNING KEY
       # =========================================================
       - name: Remove temporary signing key
         if: always()
