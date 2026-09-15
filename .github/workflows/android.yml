@@ -36,6 +36,9 @@ jobs:
 
       # =========================================================
       # 2. PREPARE PROJECT ROOT
+      #
+      # Automatically detects a Ycash project regardless of the
+      # ZIP filename or version number.
       # =========================================================
       - name: Prepare project root
         shell: bash
@@ -189,7 +192,121 @@ jobs:
           echo "PROJECT ROOT READY"
 
       # =========================================================
-      # 3. JAVA 17
+      # 3. DETECT PROJECT / NODE VERSION
+      #
+      # IMPORTANT:
+      # Nothing below requires v0.19.3/v0.19.4/etc.
+      # =========================================================
+      - name: Detect Ycash project version and node package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "AUTO-DETECTING YCASH PROJECT"
+          echo "=========================================="
+
+          MAIN="crates/ycash-android-node/src/main.rs"
+
+          test -f "$MAIN"
+
+          NODE_VERSION=""
+
+          # First try main.rs.
+          NODE_VERSION="$(
+            grep -oE \
+              'v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?' \
+              "$MAIN" \
+              | head -n1 \
+              || true
+          )"
+
+          # Then try Cargo.toml if main.rs did not contain a version.
+          if [ -z "$NODE_VERSION" ]; then
+            NODE_VERSION="$(
+              grep -RhoE \
+                'v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?' \
+                Cargo.toml \
+                crates \
+                2>/dev/null \
+                | head -n1 \
+                || true
+            )"
+          fi
+
+          # Final fallback.
+          if [ -z "$NODE_VERSION" ]; then
+            NODE_VERSION="unversioned"
+          fi
+
+          # Detect Cargo package automatically.
+          NODE_PACKAGE="$(
+            cargo metadata \
+              --format-version 1 \
+              --no-deps \
+              | python3 -c '
+          import json
+          import sys
+
+          data=json.load(sys.stdin)
+
+          packages=data.get("packages", [])
+
+          candidates=[]
+
+          for p in packages:
+              name=p.get("name","").lower()
+
+              if (
+                  "android" in name
+                  and "node" in name
+              ):
+                  candidates.append(p["name"])
+
+          if not candidates:
+              for p in packages:
+                  name=p.get("name","").lower()
+
+                  if "ycash" in name and "node" in name:
+                      candidates.append(p["name"])
+
+          if not candidates:
+              print("")
+          else:
+              print(candidates[0])
+          '
+          )"
+
+          if [ -z "$NODE_PACKAGE" ]; then
+            echo
+            echo "ERROR: Could not automatically detect Android node Cargo package."
+            echo
+            cargo metadata \
+              --format-version 1 \
+              --no-deps \
+              | python3 -c '
+          import json
+          import sys
+
+          data=json.load(sys.stdin)
+
+          for p in data.get("packages", []):
+              print(p.get("name",""))
+          '
+            exit 1
+          fi
+
+          echo "Detected node version: $NODE_VERSION"
+          echo "Detected Cargo package: $NODE_PACKAGE"
+
+          echo "NODE_VERSION=$NODE_VERSION" >> "$GITHUB_ENV"
+          echo "NODE_PACKAGE=$NODE_PACKAGE" >> "$GITHUB_ENV"
+
+          echo
+          echo "Automatic project detection PASSED."
+
+      # =========================================================
+      # 4. JAVA 17
       # =========================================================
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -198,7 +315,7 @@ jobs:
           java-version: "17"
 
       # =========================================================
-      # 4. ANDROID SDK
+      # 5. ANDROID SDK
       # =========================================================
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
@@ -206,7 +323,7 @@ jobs:
           packages: "platform-tools"
 
       # =========================================================
-      # 5. ANDROID PLATFORM + NDK
+      # 6. ANDROID PLATFORM + NDK
       # =========================================================
       - name: Install Android SDK and NDK
         shell: bash
@@ -225,7 +342,7 @@ jobs:
           echo "Android SDK installed."
 
       # =========================================================
-      # 6. RUST
+      # 7. RUST
       # =========================================================
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -233,7 +350,7 @@ jobs:
           targets: ${{ env.RUST_TARGET }}
 
       # =========================================================
-      # 7. CONFIGURE ANDROID RUST LINKER
+      # 8. CONFIGURE ANDROID RUST LINKER
       # =========================================================
       - name: Configure Android Rust linker
         shell: bash
@@ -262,7 +379,7 @@ jobs:
           echo "RANLIB_aarch64_linux_android=$LLVM/llvm-ranlib" >> "$GITHUB_ENV"
 
       # =========================================================
-      # 8. VERIFY RUST WORKSPACE
+      # 9. VERIFY RUST WORKSPACE
       # =========================================================
       - name: Verify Rust workspace
         shell: bash
@@ -282,12 +399,11 @@ jobs:
           echo "Cargo workspace verified."
 
       # =========================================================
-      # 9. VERIFY YCASH NODE SOURCE
+      # 10. VERIFY YCASH NODE SOURCE
       #
-      # Make sure the source contains the new v0.19.3
-      # diagnostics before spending time compiling it.
+      # VERSION-INDEPENDENT.
       # =========================================================
-      - name: Verify Ycash v0.19.3 diagnostics
+      - name: Verify Ycash diagnostics
         shell: bash
         run: |
           set -euo pipefail
@@ -300,29 +416,35 @@ jobs:
           test -f "$ACTIVITY"
           test -f "$MANIFEST"
 
-          echo "Checking node version..."
-          grep -q "v0.19.3" "$MAIN"
+          echo "Detected node version:"
+          echo "$NODE_VERSION"
 
+          echo
           echo "Checking status API..."
           grep -q "8834" "$MAIN"
           grep -q "YCASH_STATUS_PORT" "$MAIN"
 
+          echo
           echo "Checking RPC..."
           grep -q "8832" "$MAIN"
 
+          echo
           echo "Checking P2P..."
           grep -q "8833" "$MAIN"
           grep -q "YCASH_P2P_PORT" "$MAIN"
 
+          echo
           echo "Checking P2P diagnostics..."
           grep -q "outbound_attempts" "$MAIN"
           grep -q "outbound_handshakes" "$MAIN"
           grep -q "inbound_connections" "$MAIN"
           grep -q "last_error" "$MAIN"
 
+          echo
           echo "Checking Android status API..."
           grep -q "127.0.0.1:8834/status" "$ACTIVITY"
 
+          echo
           echo "Checking gRPC diagnostic..."
           grep -q "CompactTxStreamer/GetLatestBlock" "$ACTIVITY"
           grep -q "grpc-accept-encoding" "$ACTIVITY"
@@ -334,9 +456,7 @@ jobs:
           echo "Source diagnostic verification PASSED."
 
       # =========================================================
-      # 10. VERIFY LOCALHOST CLEAR-TEXT ACCESS
-      #
-      # The status API is intentionally HTTP on localhost:8834.
+      # 11. VERIFY LOCALHOST CLEAR-TEXT ACCESS
       # =========================================================
       - name: Verify localhost status API configuration
         shell: bash
@@ -356,7 +476,7 @@ jobs:
           echo "usesCleartextTraffic=true VERIFIED."
 
       # =========================================================
-      # 11. VERIFY NODE PORT CONTRACT
+      # 12. VERIFY NODE PORT CONTRACT
       # =========================================================
       - name: Verify Ycash port contract
         shell: bash
@@ -378,7 +498,7 @@ jobs:
           echo "Ycash port contract VERIFIED."
 
       # =========================================================
-      # 12. CARGO CACHE
+      # 13. CARGO CACHE
       # =========================================================
       - name: Cache Cargo
         uses: actions/cache@v4
@@ -393,27 +513,79 @@ jobs:
             ycash-${{ runner.os }}-
 
       # =========================================================
-      # 13. BUILD RUST ANDROID NODE
+      # 14. BUILD RUST ANDROID NODE
+      #
+      # Automatically uses detected Cargo package.
       # =========================================================
       - name: Build Ycash ARM64 Android node
         shell: bash
         run: |
           set -euo pipefail
 
+          echo "Building:"
+          echo "  Package: $NODE_PACKAGE"
+          echo "  Version: $NODE_VERSION"
+          echo "  Target:  $RUST_TARGET"
+
           cargo build \
             --release \
             --target "${RUST_TARGET}" \
-            -p ycash-android-node
+            -p "${NODE_PACKAGE}"
 
       # =========================================================
-      # 14. VERIFY ARM64 NODE
+      # 15. LOCATE BUILT NODE AUTOMATICALLY
+      # =========================================================
+      - name: Locate ARM64 node automatically
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TARGET_DIR="target/${RUST_TARGET}/release"
+
+          echo "Searching:"
+          echo "$TARGET_DIR"
+
+          mapfile -d '' BINARIES < <(
+            find "$TARGET_DIR" \
+              -maxdepth 1 \
+              -type f \
+              -perm -111 \
+              -print0 \
+          )
+
+          if [ "${#BINARIES[@]}" -eq 0 ]; then
+            echo "ERROR: No executable ARM64 node found."
+            find "$TARGET_DIR" -maxdepth 2 -type f -print
+            exit 1
+          fi
+
+          NODE=""
+
+          for candidate in "${BINARIES[@]}"; do
+            if [[ "$(basename "$candidate")" == *node* ]]; then
+              NODE="$candidate"
+              break
+            fi
+          done
+
+          if [ -z "$NODE" ]; then
+            NODE="${BINARIES[0]}"
+          fi
+
+          echo "Detected node binary:"
+          echo "$NODE"
+
+          echo "NODE_BINARY=$NODE" >> "$GITHUB_ENV"
+
+      # =========================================================
+      # 16. VERIFY ARM64 NODE
       # =========================================================
       - name: Verify ARM64 Android node
         shell: bash
         run: |
           set -euo pipefail
 
-          NODE="target/${RUST_TARGET}/release/ycash-android-node"
+          NODE="$NODE_BINARY"
 
           test -f "$NODE"
           test -x "$NODE"
@@ -448,14 +620,14 @@ jobs:
           echo "ARM64 + PIE verification PASSED."
 
       # =========================================================
-      # 15. PREPARE ANDROID NATIVE LIBRARY
+      # 17. PREPARE ANDROID NATIVE LIBRARY
       # =========================================================
       - name: Prepare Android ARM64 native node
         shell: bash
         run: |
           set -euo pipefail
 
-          NODE="target/${RUST_TARGET}/release/ycash-android-node"
+          NODE="$NODE_BINARY"
 
           JNI_LIBS="android-app/app/src/main/jniLibs/arm64-v8a"
           NATIVE_NODE="$JNI_LIBS/libycashandroidnode.so"
@@ -484,7 +656,7 @@ jobs:
           sha256sum "$NATIVE_NODE"
 
       # =========================================================
-      # 16. VERIFY NO LEGACY ASSET NODE
+      # 18. VERIFY LEGACY ASSET NODE IS ABSENT
       # =========================================================
       - name: Verify legacy asset node is absent
         shell: bash
@@ -502,7 +674,7 @@ jobs:
           echo "Legacy asset node correctly absent."
 
       # =========================================================
-      # 17. VERIFY ANDROID NATIVE NODE
+      # 19. VERIFY ANDROID NATIVE NODE
       # =========================================================
       - name: Verify Android native node
         shell: bash
@@ -523,7 +695,7 @@ jobs:
           echo "Android ARM64 native node verification PASSED."
 
       # =========================================================
-      # 18. VERIFY ANDROID PROJECT
+      # 20. VERIFY ANDROID PROJECT
       # =========================================================
       - name: Verify Android project
         shell: bash
@@ -542,7 +714,7 @@ jobs:
           echo "Android project verified."
 
       # =========================================================
-      # 19. VERIFY NATIVE LIBRARY EXTRACTION
+      # 21. VERIFY NATIVE LIBRARY EXTRACTION
       # =========================================================
       - name: Verify native library extraction configuration
         shell: bash
@@ -571,7 +743,7 @@ jobs:
           echo "Native library extraction configuration VERIFIED."
 
       # =========================================================
-      # 20. SET UP GRADLE
+      # 22. SET UP GRADLE
       # =========================================================
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -579,7 +751,7 @@ jobs:
           gradle-version: "8.9"
 
       # =========================================================
-      # 21. BUILD APK
+      # 23. BUILD APK
       # =========================================================
       - name: Build Android APK
         working-directory: android-app
@@ -593,26 +765,39 @@ jobs:
             assembleDebug
 
       # =========================================================
-      # 22. LOCATE APK
+      # 24. LOCATE APK
       # =========================================================
-      - name: Locate Gradle APK
+      - name: Locate Gradle APK automatically
         id: locate_apk
         shell: bash
         run: |
           set -euo pipefail
 
-          APK="android-app/app/build/outputs/apk/debug/app-debug.apk"
+          mapfile -d '' APKS < <(
+            find android-app/app/build/outputs/apk \
+              -type f \
+              -name '*.apk' \
+              -print0 \
+              | sort -z
+          )
 
-          test -f "$APK"
+          if [ "${#APKS[@]}" -eq 0 ]; then
+            echo "ERROR: No APK produced."
+            find android-app/app/build/outputs \
+              -type f \
+              -print || true
+            exit 1
+          fi
+
+          APK="${APKS[0]}"
+
+          echo "Detected APK:"
+          echo "$APK"
 
           echo "apk=$APK" >> "$GITHUB_OUTPUT"
 
-          echo
-          echo "APK:"
-          ls -lh "$APK"
-
       # =========================================================
-      # 23. VERIFY NATIVE NODE INSIDE APK
+      # 25. VERIFY NATIVE NODE INSIDE APK
       # =========================================================
       - name: Verify ARM64 native node in APK
         shell: bash
@@ -646,7 +831,7 @@ jobs:
           echo "Native node packaging PASSED."
 
       # =========================================================
-      # 24. EXTRACT AND VERIFY APK NATIVE NODE
+      # 26. EXTRACT AND VERIFY APK NATIVE NODE
       # =========================================================
       - name: Extract and verify APK native node
         shell: bash
@@ -692,10 +877,7 @@ jobs:
           echo "APK native node verification PASSED."
 
       # =========================================================
-      # 25. VERIFY FINAL APK SOURCE FEATURES
-      #
-      # This makes sure the actual project being packaged still
-      # contains the diagnostics we expect.
+      # 27. VERIFY FINAL APK SOURCE FEATURES
       # =========================================================
       - name: Verify final diagnostic implementation
         shell: bash
@@ -723,7 +905,7 @@ jobs:
           echo "Final diagnostic implementation VERIFIED."
 
       # =========================================================
-      # 26. GENERATE TEMPORARY DEBUG KEY
+      # 28. GENERATE TEMPORARY DEBUG KEY
       # =========================================================
       - name: Generate temporary debug signing key
         shell: bash
@@ -751,14 +933,14 @@ jobs:
           echo "Temporary CI signing key generated."
 
       # =========================================================
-      # 27. ZIPALIGN
+      # 29. ZIPALIGN
       # =========================================================
       - name: Zipalign APK
         shell: bash
         run: |
           set -euo pipefail
 
-          INPUT="android-app/app/build/outputs/apk/debug/app-debug.apk"
+          INPUT="${{ steps.locate_apk.outputs.apk }}"
 
           ALIGNED="android-app/app/build/outputs/apk/debug/ycash-android-node-aligned.apk"
 
@@ -783,7 +965,7 @@ jobs:
           ls -lh "$ALIGNED"
 
       # =========================================================
-      # 28. VERIFY ZIPALIGN
+      # 30. VERIFY ZIPALIGN
       # =========================================================
       - name: Verify zip alignment
         shell: bash
@@ -805,7 +987,7 @@ jobs:
           echo "Zip alignment verification PASSED."
 
       # =========================================================
-      # 29. SIGN ALIGNED APK
+      # 31. SIGN ALIGNED APK
       # =========================================================
       - name: Sign aligned APK
         shell: bash
@@ -814,7 +996,7 @@ jobs:
 
           ALIGNED="android-app/app/build/outputs/apk/debug/ycash-android-node-aligned.apk"
 
-          SIGNED="android-app/app/build/outputs/apk/debug/ycash-android-node-debug-signed.apk"
+          SIGNED="android-app/app/build/outputs/apk/debug/ycash-android-node-${NODE_VERSION}-debug-signed.apk"
 
           APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
 
@@ -833,19 +1015,21 @@ jobs:
 
           test -f "$SIGNED"
 
+          echo "SIGNED_APK=$SIGNED" >> "$GITHUB_ENV"
+
           echo
           echo "Signed APK:"
           ls -lh "$SIGNED"
 
       # =========================================================
-      # 30. VERIFY APK SIGNATURE
+      # 32. VERIFY APK SIGNATURE
       # =========================================================
       - name: Verify APK signature
         shell: bash
         run: |
           set -euo pipefail
 
-          SIGNED="android-app/app/build/outputs/apk/debug/ycash-android-node-debug-signed.apk"
+          SIGNED="$SIGNED_APK"
 
           APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
 
@@ -857,14 +1041,14 @@ jobs:
           echo "APK signature verification PASSED."
 
       # =========================================================
-      # 31. VERIFY FINAL SIGNED APK
+      # 33. VERIFY FINAL SIGNED APK
       # =========================================================
       - name: Verify final signed APK
         shell: bash
         run: |
           set -euo pipefail
 
-          SIGNED="android-app/app/build/outputs/apk/debug/ycash-android-node-debug-signed.apk"
+          SIGNED="$SIGNED_APK"
 
           echo "=========================================="
           echo "FINAL SIGNED APK CHECK"
@@ -886,20 +1070,29 @@ jobs:
           echo "Final native node packaging PASSED."
 
       # =========================================================
-      # 32. FINAL APK INFORMATION
+      # 34. FINAL APK INFORMATION
       # =========================================================
       - name: Display final APK information
         shell: bash
         run: |
           set -euo pipefail
 
-          SIGNED="android-app/app/build/outputs/apk/debug/ycash-android-node-debug-signed.apk"
+          SIGNED="$SIGNED_APK"
 
           echo
           echo "=========================================="
           echo "FINAL APK"
           echo "=========================================="
 
+          echo "Node version:"
+          echo "$NODE_VERSION"
+
+          echo
+          echo "Node package:"
+          echo "$NODE_PACKAGE"
+
+          echo
+          echo "APK:"
           ls -lh "$SIGNED"
 
           echo
@@ -912,27 +1105,27 @@ jobs:
           echo "=========================================="
 
       # =========================================================
-      # 33. UPLOAD SIGNED APK
+      # 35. UPLOAD SIGNED APK
       # =========================================================
       - name: Upload signed debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: ycash-android-node-debug-signed
-          path: android-app/app/build/outputs/apk/debug/ycash-android-node-debug-signed.apk
+          name: ycash-android-node-${{ env.NODE_VERSION }}-debug-signed
+          path: ${{ env.SIGNED_APK }}
           if-no-files-found: error
 
       # =========================================================
-      # 34. UPLOAD RAW ARM64 NODE
+      # 36. UPLOAD RAW ARM64 NODE
       # =========================================================
       - name: Upload ARM64 node
         uses: actions/upload-artifact@v4
         with:
-          name: ycash-android-node-arm64
-          path: target/${{ env.RUST_TARGET }}/release/ycash-android-node
+          name: ycash-android-node-${{ env.NODE_VERSION }}-arm64
+          path: ${{ env.NODE_BINARY }}
           if-no-files-found: error
 
       # =========================================================
-      # 35. CREATE BUILD DIAGNOSTICS
+      # 37. CREATE BUILD DIAGNOSTICS
       # =========================================================
       - name: Create build diagnostics
         if: always()
@@ -949,6 +1142,15 @@ jobs:
             echo
             echo "Date:"
             date -u
+            echo
+            echo "Detected node version:"
+            echo "${NODE_VERSION:-unknown}"
+            echo
+            echo "Detected Cargo package:"
+            echo "${NODE_PACKAGE:-unknown}"
+            echo
+            echo "Detected node binary:"
+            echo "${NODE_BINARY:-unknown}"
             echo
             echo "Rust:"
             rustc --version
@@ -991,18 +1193,18 @@ jobs:
           cat build-diagnostics/summary.txt
 
       # =========================================================
-      # 36. UPLOAD BUILD DIAGNOSTICS
+      # 38. UPLOAD BUILD DIAGNOSTICS
       # =========================================================
       - name: Upload build diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ycash-android-node-build-diagnostics
+          name: ycash-android-node-${{ env.NODE_VERSION }}-build-diagnostics
           path: build-diagnostics
           if-no-files-found: warn
 
       # =========================================================
-      # 37. REMOVE TEMPORARY SIGNING KEY
+      # 39. REMOVE TEMPORARY SIGNING KEY
       # =========================================================
       - name: Remove temporary signing key
         if: always()
