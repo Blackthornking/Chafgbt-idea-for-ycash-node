@@ -1,4 +1,4 @@
-name: Build, Sign and Verify Ycash Android Node
+name: Build, Sign and Verify Ycash Android Node v0.19.6
 
 on:
   workflow_dispatch:
@@ -158,6 +158,19 @@ jobs:
           grep -Rqs 'CompactTxStreamer' crates/ycash-android-node
           grep -Rqs 'GetLatestBlock' crates/ycash-android-node
 
+          # v0.19.6: 9067 must be bound exactly once and the same
+          # listener must be handed to tonic. This prevents the old
+          # bind -> drop -> re-bind sequence that could reset gRPC clients.
+          grep -q 'serve_with_incoming' crates/ycash-android-node/src/main.rs
+          grep -q 'TcpListenerStream::new(listener)' crates/ycash-android-node/src/main.rs
+          if grep -q 'drop(listener)' crates/ycash-android-node/src/main.rs; then
+            echo "ERROR: old 9067 listener drop/re-bind pattern detected." >&2
+            exit 1
+          fi
+
+          # The TcpListenerStream wrapper requires tokio-stream's net feature.
+          grep -Eq 'tokio-stream[[:space:]]*=.*features.*net' crates/ycash-android-node/Cargo.toml
+
       - name: Cache Cargo
         uses: actions/cache@v4
         with:
@@ -288,8 +301,9 @@ jobs:
           echo "P2P      : 8833"
           echo "RPC      : 8832"
           echo "STATUS   : 8834"
-          echo "WALLET   : 9067"
+          echo "WALLET   : 9067 (plaintext h2c)"
           echo "PROTOCOL : 270014"
+          echo "9067 FIX  : single-bound listener -> tonic"
           echo "gRPC     : CompactTxStreamer"
           echo "TLS TEXT : NOT REQUIRED FOR LOCAL 9067"
           echo "=========================================="
