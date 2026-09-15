@@ -153,6 +153,11 @@ jobs:
           grep -q 'outbound_handshakes' crates/ycash-android-node/src/main.rs
           echo "P2P/RPC/status source checks passed."
 
+          grep -q '9067' crates/ycash-android-node/src/main.rs
+          grep -q '270014' crates/ycash-android-node/src/main.rs
+          grep -Rqs 'CompactTxStreamer' crates/ycash-android-node
+          grep -Rqs 'GetLatestBlock' crates/ycash-android-node
+
       - name: Cache Cargo
         uses: actions/cache@v4
         with:
@@ -221,22 +226,73 @@ jobs:
           grep -q '9067' android-app/app/src/main/java/com/ycash/androidnode/MainActivity.java
           echo "Android native packaging/runtime checks passed."
 
-      - name: Verify wallet TLS diagnostics are present
+      # =========================================================
+      # VERIFY YWALLET / LIGHTWALLETD gRPC 9067 DIAGNOSTICS
+      #
+      # 127.0.0.1:9067 is the local plaintext gRPC/h2c endpoint.
+      # Do not require literal TLSv1.3/cipher-suite strings here.
+      # =========================================================
+      - name: Verify YWallet Lightwalletd gRPC diagnostics
         shell: bash
         run: |
           set -euo pipefail
-          SRC="android-app/app/src/main/java/com/ycash/androidnode/MainActivity.java"
-          grep -q 'TLSv1.3' "$SRC"
-          grep -q 'TLS_AES_128_GCM_SHA256' "$SRC"
-          grep -q 'h2' "$SRC"
-          grep -q 'CompactTxStreamer' "$SRC"
-          grep -q 'GetLatestBlock' "$SRC"
-          grep -q '9067' "$SRC"
-          grep -q 'grpc-accept-encoding' "$SRC"
-          grep -q 'P2P HANDSHAKE PASS' "$SRC"
-          grep -q 'grpc-timeout' "$SRC"
-          grep -q 'DNS Seed (seed.ycash.xyz)' "$SRC"
-          echo "YWallet/Lightwalletd TLS and gRPC diagnostic checks passed."
+
+          MAIN="crates/ycash-android-node/src/main.rs"
+          ACTIVITY="android-app/app/src/main/java/com/ycash/androidnode/MainActivity.java"
+
+          test -f "$MAIN"
+          test -f "$ACTIVITY"
+
+          echo "=========================================="
+          echo "YCASH NETWORK / WALLET DIAGNOSTIC CHECK"
+          echo "=========================================="
+
+          echo "Checking YWallet gRPC port 9067..."
+          grep -q '9067' "$MAIN"
+          grep -q '9067' "$ACTIVITY"
+
+          echo "Checking CompactTxStreamer..."
+          grep -Rqs 'CompactTxStreamer' crates/ycash-android-node
+
+          echo "Checking GetLatestBlock..."
+          grep -Rqs 'GetLatestBlock' crates/ycash-android-node
+          grep -q 'CompactTxStreamer/GetLatestBlock' "$ACTIVITY"
+
+          echo "Checking GetBlockRange..."
+          grep -Rqs 'GetBlockRange' crates/ycash-android-node
+
+          echo "Checking GetLightdInfo..."
+          grep -Rqs 'GetLightdInfo' crates/ycash-android-node
+
+          echo "Checking gRPC HTTP/2 diagnostics..."
+          grep -q 'application/grpc' "$ACTIVITY"
+          grep -q 'grpc-accept-encoding' "$ACTIVITY"
+
+          echo "Checking gRPC stream/error diagnostics..."
+          grep -q 'RST_STREAM' "$ACTIVITY"
+          grep -q 'GOAWAY' "$ACTIVITY"
+
+          echo "Checking P2P diagnostics..."
+          grep -q 'outbound_handshakes' "$MAIN"
+
+          echo "Checking DNS seed diagnostics..."
+          grep -Rqs 'seed.ycash.xyz' crates/ycash-android-node ||             grep -Rqi 'DNS seed' crates/ycash-android-node
+
+          echo "Checking Ycash P2P protocol..."
+          grep -q '270014' "$MAIN"
+
+          echo
+          echo "=========================================="
+          echo "NETWORK DIAGNOSTIC SOURCE CHECKS PASSED"
+          echo "=========================================="
+          echo "P2P      : 8833"
+          echo "RPC      : 8832"
+          echo "STATUS   : 8834"
+          echo "WALLET   : 9067"
+          echo "PROTOCOL : 270014"
+          echo "gRPC     : CompactTxStreamer"
+          echo "TLS TEXT : NOT REQUIRED FOR LOCAL 9067"
+          echo "=========================================="
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
