@@ -470,33 +470,22 @@ jobs:
             echo "$CLANG"
             echo
             echo "Available ARM64 Clang executables:"
+
             find "$TOOLCHAIN" \
               -maxdepth 1 \
               -type f \
               -name 'aarch64-linux-android*clang*' \
               -printf '%f\n' \
               | sort
+
             exit 1
           fi
 
-          if [[ ! -x "$AR" ]]; then
-            echo "ERROR: llvm-ar not found:"
-            echo "$AR"
-            exit 1
-          fi
+          test -x "$AR"
+          test -x "$RANLIB"
+          test -x "$STRIP"
 
-          if [[ ! -x "$RANLIB" ]]; then
-            echo "ERROR: llvm-ranlib not found:"
-            echo "$RANLIB"
-            exit 1
-          fi
-
-          if [[ ! -x "$STRIP" ]]; then
-            echo "ERROR: llvm-strip not found:"
-            echo "$STRIP"
-            exit 1
-          fi
-
+          echo
           echo "FOUND:"
           echo "  $CLANG"
           echo "  $AR"
