@@ -395,12 +395,92 @@ jobs:
           echo "All Rust test fixtures verified."
 
       # ------------------------------------------------------------
+      # 8B. VERIFY SEQUENTIAL SMALL-BATCH PIPELINE CONFIGURATION
+      # ------------------------------------------------------------
+      - name: Verify sequential small-batch pipeline configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "============================================================"
+          echo "Verifying sequential small-batch pipeline configuration"
+          echo "============================================================"
+
+          PIPELINE_CONFIG="config/pipeline.toml"
+          ADAPTIVE_SOURCE="crates/state/src/pipeline/adaptive.rs"
+          PIPELINE_SOURCE="crates/state/src/pipeline/mod.rs"
+
+          test -f "$PIPELINE_CONFIG"
+          test -f "$ADAPTIVE_SOURCE"
+          test -f "$PIPELINE_SOURCE"
+
+          echo
+          echo "Pipeline configuration:"
+          cat "$PIPELINE_CONFIG"
+
+          echo
+          echo "Checking required sequential settings..."
+
+          grep -Eq '^[[:space:]]*min_window[[:space:]]*=[[:space:]]*16[[:space:]]*$' \
+            "$PIPELINE_CONFIG"
+
+          grep -Eq '^[[:space:]]*initial_window[[:space:]]*=[[:space:]]*16[[:space:]]*$' \
+            "$PIPELINE_CONFIG"
+
+          grep -Eq '^[[:space:]]*max_window[[:space:]]*=[[:space:]]*16[[:space:]]*$' \
+            "$PIPELINE_CONFIG"
+
+          grep -Eq '^[[:space:]]*window_step[[:space:]]*=[[:space:]]*1[[:space:]]*$' \
+            "$PIPELINE_CONFIG"
+
+          grep -Eq '^[[:space:]]*max_validation_workers[[:space:]]*=[[:space:]]*1[[:space:]]*$' \
+            "$PIPELINE_CONFIG"
+
+          grep -Eq '^[[:space:]]*max_inflight_ranges[[:space:]]*=[[:space:]]*1[[:space:]]*$' \
+            "$PIPELINE_CONFIG"
+
+          echo
+          echo "Checking hard maximum range size..."
+
+          grep -Eq \
+            'const MAX_RANGE_LEN:[[:space:]]*u64[[:space:]]*=[[:space:]]*16[[:space:]]*;' \
+            "$PIPELINE_SOURCE"
+
+          echo
+          echo "Checking adaptive defaults..."
+
+          grep -Eq 'min_window:[[:space:]]*16' \
+            "$ADAPTIVE_SOURCE"
+
+          grep -Eq 'initial_window:[[:space:]]*16' \
+            "$ADAPTIVE_SOURCE"
+
+          grep -Eq 'max_window:[[:space:]]*16' \
+            "$ADAPTIVE_SOURCE"
+
+          echo
+          echo "============================================================"
+          echo "Sequential pipeline configuration verified"
+          echo "============================================================"
+
+          echo
+          echo "Batch size:             16 blocks"
+          echo "Maximum window:         16 blocks"
+          echo "In-flight ranges:       1"
+          echo "Validation workers:     1"
+          echo "Adaptive growth:        disabled"
+
+      # ------------------------------------------------------------
       # 9. RUST REGRESSION TESTS
       # ------------------------------------------------------------
       - name: Run Rust regression tests
         shell: bash
         run: |
           set -euo pipefail
+
+          echo "============================================================"
+          echo "Running Rust workspace regression tests"
+          echo "============================================================"
 
           cargo test --workspace --all-targets
 
@@ -1255,7 +1335,7 @@ jobs:
 
           echo "Temporary CI keystore created."
 
-            # ------------------------------------------------------------
+      # ------------------------------------------------------------
       # 28. LOCATE ANDROID BUILD TOOLS
       # ------------------------------------------------------------
       - name: Locate Android signing tools
