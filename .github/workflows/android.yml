@@ -195,9 +195,6 @@ jobs:
 
       # ------------------------------------------------------------
       # 5. ANDROID SDK / NDK
-      #
-      # Empty packages prevents setup-android from attempting to
-      # install the obsolete "tools" package.
       # ------------------------------------------------------------
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
@@ -371,18 +368,18 @@ jobs:
       # ------------------------------------------------------------
       # 11. ANDROID ARM64 TOOLCHAIN CONFIGURATION
       #
-      # Modern Android NDKs provide LLVM tools such as:
+      # NDK 27.2 provides API-level Clang such as:
       #
-      #   llvm-ar
-      #   llvm-ranlib
-      #   llvm-strip
+      #   aarch64-linux-android35-clang
       #
-      # cc-rs may search for target-prefixed tools such as:
+      # Do NOT require:
       #
-      #   aarch64-linux-android-ar
-      #   aarch64-linux-android-ranlib
+      #   aarch64-linux-android-clang
       #
-      # Private executable wrappers are created for those names.
+      # because that unversioned executable is not guaranteed to
+      # exist in modern Android NDK releases.
+      #
+      # Private wrappers are created for tools expected by cc-rs.
       # ------------------------------------------------------------
       - name: Configure Android ARM64 linker
         shell: bash
@@ -395,14 +392,27 @@ jobs:
 
           NDK_ROOT="${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK}"
 
-          test -d "$NDK_ROOT"
+          if [[ ! -d "$NDK_ROOT" ]]; then
+            echo "ERROR: Requested NDK does not exist:"
+            echo "$NDK_ROOT"
+            exit 1
+          fi
 
           TOOLCHAIN="${NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
-          test -d "$TOOLCHAIN"
+          if [[ ! -d "$TOOLCHAIN" ]]; then
+            echo "ERROR: LLVM toolchain directory does not exist:"
+            echo "$TOOLCHAIN"
+            exit 1
+          fi
 
+          # --------------------------------------------------------
+          # Use the API-level Android Clang supplied by the NDK.
+          #
+          # NDK 27.2 does not require an unversioned
+          # aarch64-linux-android-clang executable.
+          # --------------------------------------------------------
           CLANG="${TOOLCHAIN}/aarch64-linux-android${ANDROID_API}-clang"
-          CLANG_UNVERSIONED="${TOOLCHAIN}/aarch64-linux-android-clang"
           AR="${TOOLCHAIN}/llvm-ar"
           RANLIB="${TOOLCHAIN}/llvm-ranlib"
           STRIP="${TOOLCHAIN}/llvm-strip"
@@ -410,15 +420,40 @@ jobs:
           echo
           echo "Checking Android LLVM tools..."
 
-          test -x "$CLANG"
-          test -x "$CLANG_UNVERSIONED"
-          test -x "$AR"
-          test -x "$RANLIB"
-          test -x "$STRIP"
+          if [[ ! -x "$CLANG" ]]; then
+            echo "ERROR: Android ARM64 Clang not found:"
+            echo "$CLANG"
+            echo
+            echo "Available ARM64 Clang executables:"
+            find "$TOOLCHAIN" \
+              -maxdepth 1 \
+              -type f \
+              -name 'aarch64-linux-android*clang*' \
+              -printf '%f\n' \
+              | sort
+            exit 1
+          fi
+
+          if [[ ! -x "$AR" ]]; then
+            echo "ERROR: llvm-ar not found:"
+            echo "$AR"
+            exit 1
+          fi
+
+          if [[ ! -x "$RANLIB" ]]; then
+            echo "ERROR: llvm-ranlib not found:"
+            echo "$RANLIB"
+            exit 1
+          fi
+
+          if [[ ! -x "$STRIP" ]]; then
+            echo "ERROR: llvm-strip not found:"
+            echo "$STRIP"
+            exit 1
+          fi
 
           echo "FOUND:"
           echo "  $CLANG"
-          echo "  $CLANG_UNVERSIONED"
           echo "  $AR"
           echo "  $RANLIB"
           echo "  $STRIP"
@@ -432,32 +467,43 @@ jobs:
           mkdir -p "$TOOL_WRAPPER_DIR"
 
           # --------------------------------------------------------
-          # Create executable wrappers instead of symlinks.
-          #
-          # This makes the target-prefixed commands deterministic
-          # and avoids conflicts with existing files.
+          # Target-prefixed archive tool.
           # --------------------------------------------------------
-
           cat > "$TOOL_WRAPPER_DIR/aarch64-linux-android-ar" <<EOF
           #!/usr/bin/env bash
           exec "$AR" "\$@"
           EOF
 
+          # --------------------------------------------------------
+          # Target-prefixed ranlib tool.
+          # --------------------------------------------------------
           cat > "$TOOL_WRAPPER_DIR/aarch64-linux-android-ranlib" <<EOF
           #!/usr/bin/env bash
           exec "$RANLIB" "\$@"
           EOF
 
+          # --------------------------------------------------------
+          # Target-prefixed strip tool.
+          # --------------------------------------------------------
           cat > "$TOOL_WRAPPER_DIR/aarch64-linux-android-strip" <<EOF
           #!/usr/bin/env bash
           exec "$STRIP" "\$@"
           EOF
 
+          # --------------------------------------------------------
+          # Unversioned target-prefixed Clang wrapper.
+          #
+          # This is our wrapper, not an NDK executable.
+          # It deliberately invokes the API-level Clang above.
+          # --------------------------------------------------------
           cat > "$TOOL_WRAPPER_DIR/aarch64-linux-android-clang" <<EOF
           #!/usr/bin/env bash
-          exec "$CLANG_UNVERSIONED" "\$@"
+          exec "$CLANG" "\$@"
           EOF
 
+          # --------------------------------------------------------
+          # Explicit API-level Clang wrapper.
+          # --------------------------------------------------------
           cat > "$TOOL_WRAPPER_DIR/aarch64-linux-android${ANDROID_API}-clang" <<EOF
           #!/usr/bin/env bash
           exec "$CLANG" "\$@"
@@ -483,7 +529,7 @@ jobs:
           export PATH="$TOOL_WRAPPER_DIR:$TOOLCHAIN:$PATH"
 
           # --------------------------------------------------------
-          # Persist PATH for every subsequent GitHub Actions step.
+          # Persist PATH for subsequent GitHub Actions steps.
           # --------------------------------------------------------
           echo "$TOOL_WRAPPER_DIR" >> "$GITHUB_PATH"
           echo "$TOOLCHAIN" >> "$GITHUB_PATH"
@@ -529,6 +575,7 @@ jobs:
           command -v aarch64-linux-android-ranlib
           command -v aarch64-linux-android-strip
           command -v aarch64-linux-android-clang
+          command -v "aarch64-linux-android${ANDROID_API}-clang"
 
           echo
           echo "aarch64-linux-android-ar:"
@@ -545,6 +592,10 @@ jobs:
           echo
           echo "ARM64 Clang:"
           aarch64-linux-android-clang --version | sed -n '1,5p'
+
+          echo
+          echo "API-level ARM64 Clang:"
+          "aarch64-linux-android${ANDROID_API}-clang" --version | sed -n '1,5p'
 
           echo
           echo "Android ARM64 toolchain configuration completed."
