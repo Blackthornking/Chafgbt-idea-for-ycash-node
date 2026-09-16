@@ -347,6 +347,8 @@ jobs:
           want "sync_channel::<VerifyJob>" "$PIPE" "bounded verify channel"
           want "const HEDGE_AFTER" "$PIPE" "hedged head-of-line range"
           want "fn open_reader" crates/state/src/lib.rs "read-only header connection"
+          want "pub struct ProofBatch" "$CONS" "batched Sapling proof verification"
+          want "pub struct SaplingBatch" crates/ycash-crypto/src/batch.rs "Groth16 batch verifier"
           if [[ -f "$PIPE" ]] && grep -Fq "let workers = 1usize;" "$PIPE"; then
             echo "WARN: sequential worker clamp present"; warns=$((warns+1))
           fi
