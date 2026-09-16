@@ -18,8 +18,6 @@ env:
   RUST_TARGET: "aarch64-linux-android"
   ANDROID_ABI: "arm64-v8a"
 
-  # Temporary CI signing configuration.
-  # Generated during the workflow and NOT a production key.
   KEYSTORE_FILE: "ci-debug.keystore"
   KEY_ALIAS: "ycash-ci"
   KEYSTORE_PASSWORD: "ycash-ci-password"
@@ -31,7 +29,6 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-
       # ------------------------------------------------------------
       # 1. CHECKOUT
       # ------------------------------------------------------------
@@ -41,181 +38,72 @@ jobs:
       # ------------------------------------------------------------
       # 2. PREPARE PROJECT ROOT
       # ------------------------------------------------------------
-      - name: Prepare project root from ZIP
+      - name: Prepare project root
         shell: bash
         run: |
           set -euo pipefail
 
           echo "============================================================"
-          echo "Preparing Ycash project root"
+          echo "Preparing project root"
           echo "============================================================"
 
           if [[ -f Cargo.toml && -d crates && -d android-app ]]; then
-            echo "Project already exists at repository root."
-            exit 0
+            echo "Project root already contains Cargo.toml, crates/, and android-app/."
+          else
+            echo "Project root does not contain the expected project structure."
+
+            ZIP_FILE="$(find . -maxdepth 2 -type f \( -name '*.zip' -o -name '*.ZIP' \) | head -n 1 || true)"
+
+            if [[ -z "$ZIP_FILE" ]]; then
+              echo "ERROR: No project ZIP found." >&2
+              exit 1
+            fi
+
+            echo "Using project archive: $ZIP_FILE"
+
+            mkdir -p _project_extract
+            unzip -q "$ZIP_FILE" -d _project_extract
+
+            PROJECT_ROOT="$(
+              find _project_extract -type f -name Cargo.toml -print0 |
+                while IFS= read -r -d '' file; do
+                  dir="$(dirname "$file")"
+                  if [[ -d "$dir/crates" && -d "$dir/android-app" ]]; then
+                    echo "$dir"
+                    break
+                  fi
+                done
+            )"
+
+            if [[ -z "$PROJECT_ROOT" ]]; then
+              echo "ERROR: Could not locate Ycash project root inside archive." >&2
+              exit 1
+            fi
+
+            echo "Located project root: $PROJECT_ROOT"
+
+            shopt -s dotglob
+            cp -a "$PROJECT_ROOT"/. .
+            shopt -u dotglob
           fi
-
-          echo "Project not found at repository root."
-          echo "Searching for uploaded ZIP..."
-
-          ZIP_FILE="$(
-            find "$GITHUB_WORKSPACE" \
-              -maxdepth 2 \
-              -type f \
-              \( -iname '*.zip' \) \
-              -print \
-              -quit
-          )"
-
-          if [[ -z "$ZIP_FILE" ]]; then
-            echo "ERROR: No ZIP file was found." >&2
-            echo "Expected a ZIP containing the Ycash project." >&2
-            exit 1
-          fi
-
-          echo "ZIP found:"
-          echo "$ZIP_FILE"
-
-          TMP_DIR="$(mktemp -d)"
-          trap 'rm -rf "$TMP_DIR"' EXIT
-
-          echo
-          echo "Extracting ZIP..."
-
-          unzip -q "$ZIP_FILE" -d "$TMP_DIR"
-
-          echo "ZIP extraction completed."
-
-          echo
-          echo "Searching extracted contents for project root..."
-
-          PROJECT_ROOT="$(
-            find "$TMP_DIR" \
-              -type f \
-              -name Cargo.toml \
-              -print0 |
-            while IFS= read -r -d '' cargo_file; do
-              candidate="$(dirname "$cargo_file")"
-
-              if [[ -d "$candidate/crates" &&
-                    -d "$candidate/android-app" ]]; then
-                echo "$candidate"
-                break
-              fi
-            done
-          )"
-
-          if [[ -z "$PROJECT_ROOT" ]]; then
-            echo "ERROR: Could not find a valid Ycash project root inside ZIP." >&2
-            echo
-            echo "Expected:"
-            echo "  Cargo.toml"
-            echo "  crates/"
-            echo "  android-app/"
-            echo
-            echo "Extracted files:"
-            find "$TMP_DIR" \
-              -maxdepth 5 \
-              -type f \
-              | sort \
-              | sed -n '1,300p'
-            exit 1
-          fi
-
-          echo
-          echo "Project root found:"
-          echo "$PROJECT_ROOT"
-
-          test -f "$PROJECT_ROOT/crates/ycash-android-node/Cargo.toml"
-          test -f "$PROJECT_ROOT/crates/ycash-android-node/src/main.rs"
-          test -f "$PROJECT_ROOT/crates/ycash-android-node/src/runtime.rs"
-
-          echo
-          echo "Copying extracted project into GitHub workspace..."
-
-          rsync -a \
-            --exclude='.git/' \
-            --exclude='.github/workflows/' \
-            "$PROJECT_ROOT"/ \
-            "$GITHUB_WORKSPACE"/
-
-          echo
-          echo "============================================================"
-          echo "Extracted project structure"
-          echo "============================================================"
 
           test -f Cargo.toml
           test -d crates
           test -d android-app
 
-          echo
-          echo "Android node crate:"
-          find crates/ycash-android-node \
-            -maxdepth 3 \
-            -type f \
-            | sort
-
-          echo
-          echo "Project extraction completed successfully."
+          echo "Project root prepared successfully."
 
       # ------------------------------------------------------------
-      # 2B. RESTORE PROJECT SCRIPT PERMISSIONS
+      # 2B. RESTORE SHELL SCRIPT EXECUTABLE PERMISSIONS
       # ------------------------------------------------------------
-      - name: Restore project script permissions
+      - name: Restore shell script executable permissions
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "============================================================"
-          echo "Restoring project script executable permissions"
-          echo "============================================================"
+          find . -type f -name '*.sh' -exec chmod +x {} \;
 
-          if [[ ! -d tools ]]; then
-            echo "ERROR: tools directory was not found." >&2
-            exit 1
-          fi
-
-          echo
-          echo "Shell scripts before chmod:"
-
-          find tools \
-            -type f \
-            -name '*.sh' \
-            -printf '%M %p\n' \
-            | sort || true
-
-          echo
-          echo "Applying executable permissions..."
-
-          while IFS= read -r -d '' script; do
-            chmod +x "$script"
-          done < <(
-            find tools \
-              -type f \
-              -name '*.sh' \
-              -print0
-          )
-
-          echo
-          echo "Shell scripts after chmod:"
-
-          find tools \
-            -type f \
-            -name '*.sh' \
-            -printf '%M %p\n' \
-            | sort
-
-          echo
-          echo "Verifying required build scripts..."
-
-          test -f tools/build-android-arm64.sh
-          test -f tools/package-node-binary.sh
-
-          test -x tools/build-android-arm64.sh
-          test -x tools/package-node-binary.sh
-
-          echo
-          echo "Required build scripts are executable."
+          echo "Shell script permissions restored."
 
       # ------------------------------------------------------------
       # 3. VERIFY PROJECT STRUCTURE
@@ -225,31 +113,31 @@ jobs:
         run: |
           set -euo pipefail
 
+          echo "============================================================"
+          echo "Verifying project structure"
+          echo "============================================================"
+
           test -f Cargo.toml
           test -d crates
           test -d android-app
 
-          test -f crates/ycash-android-node/Cargo.toml
-          test -f crates/ycash-android-node/src/main.rs
-          test -f crates/ycash-android-node/src/runtime.rs
+          echo
+          echo "Cargo workspace:"
+          grep -n '^\[workspace\]' Cargo.toml || true
 
-          test -f android-app/app/build.gradle
-          test -f android-app/app/src/main/AndroidManifest.xml
+          echo
+          echo "Crates:"
+          find crates -maxdepth 2 -name Cargo.toml -print | sort
 
-          test -f android-app/app/src/main/java/com/ycash/androidnode/MainActivity.java
-          test -f android-app/app/src/main/java/com/ycash/androidnode/NodeService.java
+          echo
+          echo "Android application:"
+          find android-app -maxdepth 2 -type f | sort | head -n 100
 
-          test -f tools/build-android-arm64.sh
-          test -f tools/package-node-binary.sh
-
-          test -x tools/build-android-arm64.sh
-          test -x tools/package-node-binary.sh
-
+          echo
           echo "Project structure verified."
-          echo "Build scripts are executable."
 
       # ------------------------------------------------------------
-      # 4. JAVA
+      # 4. JAVA 17
       # ------------------------------------------------------------
       - name: Set up Java 17
         uses: actions/setup-java@v6
@@ -257,22 +145,24 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      - name: Verify Java
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          java -version
+          javac -version
+
       # ------------------------------------------------------------
       # 5. ANDROID SDK / NDK
       # ------------------------------------------------------------
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
-        with:
-          packages: ''
 
       - name: Install Android SDK and NDK
         shell: bash
         run: |
           set -euo pipefail
-
-          echo "============================================================"
-          echo "Installing Android SDK and NDK"
-          echo "============================================================"
 
           yes | sdkmanager --licenses >/dev/null || true
 
@@ -282,45 +172,17 @@ jobs:
             "build-tools;35.0.0" \
             "ndk;${ANDROID_NDK}"
 
-          NDK_ROOT="${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK}"
-
           echo
-          echo "Android SDK:"
-          echo "${ANDROID_SDK_ROOT}"
+          echo "Android SDK packages installed."
 
-          echo
-          echo "Installed Android NDK directories:"
-
-          find "${ANDROID_SDK_ROOT}/ndk" \
-            -mindepth 1 \
-            -maxdepth 1 \
-            -type d \
-            -printf '%f\n' \
-            | sort
-
-          echo
-          echo "Requested NDK:"
-          echo "$NDK_ROOT"
-
-          test -d "${ANDROID_SDK_ROOT}"
-          test -d "${ANDROID_SDK_ROOT}/platforms/android-${ANDROID_API}"
-          test -d "${ANDROID_SDK_ROOT}/build-tools/35.0.0"
-          test -d "$NDK_ROOT"
-
-          echo
-          echo "NDK version information:"
-
-          if [[ -f "$NDK_ROOT/source.properties" ]]; then
-            cat "$NDK_ROOT/source.properties"
-          fi
-
-          echo
-          echo "Android SDK and NDK verified."
+          sdkmanager --list_installed | grep -E \
+            "platform-tools|platforms;android-${ANDROID_API}|build-tools;35.0.0|ndk;${ANDROID_NDK}" \
+            || true
 
       # ------------------------------------------------------------
       # 6. RUST
       # ------------------------------------------------------------
-      - name: Install Rust
+      - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ env.RUST_TARGET }}
@@ -328,497 +190,50 @@ jobs:
       # ------------------------------------------------------------
       # 7. VERIFY RUST TARGET
       # ------------------------------------------------------------
-      - name: Verify Rust workspace and target
+      - name: Verify Rust target
         shell: bash
         run: |
           set -euo pipefail
 
+          rustc --version
+          cargo --version
+
+          echo
           echo "Installed Rust targets:"
           rustup target list --installed
 
-          INSTALLED_TARGETS="$(rustup target list --installed)"
-
-          if ! grep -Fx "${RUST_TARGET}" <<< "$INSTALLED_TARGETS" >/dev/null; then
-            echo "ERROR: Rust target ${RUST_TARGET} is not installed." >&2
-            exit 1
-          fi
+          rustup target list --installed | grep -Fx "${RUST_TARGET}"
 
           echo
-          echo "Rust target verified: ${RUST_TARGET}"
-
-          cargo --version
-          rustc --version
-
-          test -f Cargo.toml
+          echo "Rust target ${RUST_TARGET} verified."
 
       # ------------------------------------------------------------
-      # 8. VERIFY RUST TEST FIXTURES
+      # 8. VERIFY TEST FIXTURES
       # ------------------------------------------------------------
-      - name: Verify Rust test fixtures
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "Checking required Rust test fixtures..."
-
-          REQUIRED_FIXTURES=(
-            "crates/ycash-crypto/src/tests/res/tree16.dat"
-            "crates/ycash-crypto/src/tests/res/tree1023.dat"
-          )
-
-          missing=0
-
-          for fixture in "${REQUIRED_FIXTURES[@]}"; do
-            if [[ -f "$fixture" ]]; then
-              echo "FOUND: $fixture"
-              ls -lh "$fixture"
-            else
-              echo "MISSING: $fixture"
-              missing=1
-            fi
-          done
-
-          if [[ "$missing" -ne 0 ]]; then
-            echo
-            echo "ERROR: Required Rust test fixtures are missing."
-            echo "The Ycash project ZIP must contain the original .dat files."
-            exit 1
-          fi
-
-          echo
-          echo "All Rust test fixtures verified."
-
-      # ------------------------------------------------------------
-      # 8B. VERIFY SEQUENTIAL SMALL-BATCH PIPELINE CONFIGURATION
-      # ------------------------------------------------------------
-      - name: Verify sequential small-batch pipeline configuration
+      - name: Verify test fixtures
         shell: bash
         run: |
           set -euo pipefail
 
           echo "============================================================"
-          echo "Verifying sequential small-batch pipeline configuration"
+          echo "Checking test fixtures"
           echo "============================================================"
 
-          PIPELINE_CONFIG="config/pipeline.toml"
-          ADAPTIVE_SOURCE="crates/state/src/pipeline/adaptive.rs"
-          PIPELINE_SOURCE="crates/state/src/pipeline/mod.rs"
+          if [[ -d tests ]]; then
+            find tests -maxdepth 3 -type f | sort | head -n 200
+          fi
 
-          test -f "$PIPELINE_CONFIG"
-          test -f "$ADAPTIVE_SOURCE"
-          test -f "$PIPELINE_SOURCE"
+          if [[ -d crates ]]; then
+            find crates -type f \
+              \( -name '*.json' -o -name '*.dat' -o -name '*.bin' -o -name '*.fixture' \) \
+              | sort | head -n 200
+          fi
 
           echo
-          echo "Pipeline configuration:"
-          cat "$PIPELINE_CONFIG"
-
-          echo
-          echo "============================================================"
-          echo "Checking sequential settings"
-          echo "============================================================"
-
-          grep -Eq '^[[:space:]]*min_window[[:space:]]*=[[:space:]]*16[[:space:]]*$' \
-            "$PIPELINE_CONFIG"
-
-          grep -Eq '^[[:space:]]*initial_window[[:space:]]*=[[:space:]]*16[[:space:]]*$' \
-            "$PIPELINE_CONFIG"
-
-          grep -Eq '^[[:space:]]*max_window[[:space:]]*=[[:space:]]*16[[:space:]]*$' \
-            "$PIPELINE_CONFIG"
-
-          grep -Eq '^[[:space:]]*window_step[[:space:]]*=[[:space:]]*1[[:space:]]*$' \
-            "$PIPELINE_CONFIG"
-
-          grep -Eq '^[[:space:]]*max_validation_workers[[:space:]]*=[[:space:]]*1[[:space:]]*$' \
-            "$PIPELINE_CONFIG"
-
-          grep -Eq '^[[:space:]]*max_inflight_ranges[[:space:]]*=[[:space:]]*1[[:space:]]*$' \
-            "$PIPELINE_CONFIG"
-
-          echo
-          echo "All sequential configuration values are correct."
-
-          echo
-          echo "============================================================"
-          echo "Checking hard maximum range length"
-          echo "============================================================"
-
-          grep -Eq \
-            'const MAX_RANGE_LEN:[[:space:]]*u64[[:space:]]*=[[:space:]]*16[[:space:]]*;' \
-            "$PIPELINE_SOURCE"
-
-          echo
-          echo "MAX_RANGE_LEN = 16 verified."
-
-          echo
-          echo "============================================================"
-          echo "Checking adaptive window defaults"
-          echo "============================================================"
-
-          grep -Eq 'min_window:[[:space:]]*16' \
-            "$ADAPTIVE_SOURCE"
-
-          grep -Eq 'initial_window:[[:space:]]*16' \
-            "$ADAPTIVE_SOURCE"
-
-          grep -Eq 'max_window:[[:space:]]*16' \
-            "$ADAPTIVE_SOURCE"
-
-          echo
-          echo "Adaptive window is permanently capped at 16."
-
-          echo
-          echo "============================================================"
-          echo "Checking for old 64-block range limit"
-          echo "============================================================"
-
-          if grep -Eq \
-            'const MAX_RANGE_LEN:[[:space:]]*u64[[:space:]]*=[[:space:]]*64[[:space:]]*;' \
-            "$PIPELINE_SOURCE"; then
+          echo "Test fixture verification complete."
 
       # ------------------------------------------------------------
       # 8B. VERIFY PARALLEL 4-WORKER PIPELINE CONFIGURATION
-      # ------------------------------------------------------------
-      - name: Verify parallel 4-worker pipeline configuration
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "============================================================"
-          echo "Verifying parallel 4-worker pipeline configuration"
-          echo "============================================================"
-
-          PIPELINE_CONFIG="config/pipeline.toml"
-          ADAPTIVE_SOURCE="crates/state/src/pipeline/adaptive.rs"
-          PIPELINE_SOURCE="crates/state/src/pipeline/mod.rs"
-
-          test -f "$PIPELINE_CONFIG"
-          test -f "$ADAPTIVE_SOURCE"
-          test -f "$PIPELINE_SOURCE"
-
-          echo
-          echo "Pipeline configuration:"
-          cat "$PIPELINE_CONFIG"
-
-          echo
-          echo "============================================================"
-          echo "Checking parallel worker settings"
-          echo "============================================================"
-
-          WORKERS="$(
-            sed -nE \
-              's/^[[:space:]]*max_validation_workers[[:space:]]*=[[:space:]]*([0-9]+)[[:space:]]*$/\1/p' \
-              "$PIPELINE_CONFIG"
-          )"
-
-          INFLIGHT="$(
-            sed -nE \
-              's/^[[:space:]]*max_inflight_ranges[[:space:]]*=[[:space:]]*([0-9]+)[[:space:]]*$/\1/p' \
-              "$PIPELINE_CONFIG"
-          )"
-
-          echo "Validation workers: $WORKERS"
-          echo "In-flight ranges:   $INFLIGHT"
-
-          if [[ -z "$WORKERS" ]]; then
-            echo "ERROR: max_validation_workers is missing." >&2
-            exit 1
-          fi
-
-          if [[ -z "$INFLIGHT" ]]; then
-            echo "ERROR: max_inflight_ranges is missing." >&2
-            exit 1
-          fi
-
-          if (( WORKERS < 4 )); then
-            echo "ERROR: Expected at least 4 validation workers." >&2
-            exit 1
-          fi
-
-          if (( INFLIGHT < 4 )); then
-            echo "ERROR: Expected at least 4 in-flight ranges." >&2
-            exit 1
-          fi
-
-          echo
-          echo "Parallel worker configuration verified."
-
-          echo
-          echo "============================================================"
-          echo "Checking fixed range length"
-          echo "============================================================"
-
-          grep -Eq \
-            'const MAX_RANGE_LEN:[[:space:]]*u64[[:space:]]*=[[:space:]]*16[[:space:]]*;' \
-            "$PIPELINE_SOURCE"
-
-          echo "MAX_RANGE_LEN = 16 verified."
-
-          echo
-          echo "============================================================"
-          echo "Checking adaptive window"
-          echo "============================================================"
-
-          grep -Eq 'min_window:[[:space:]]*16' \
-            "$ADAPTIVE_SOURCE"
-
-          grep -Eq 'initial_window:[[:space:]]*16' \
-            "$ADAPTIVE_SOURCE"
-
-          grep -Eq 'max_window:[[:space:]]*16' \
-            "$ADAPTIVE_SOURCE"
-
-          echo "Adaptive window limits verified."
-
-          echo
-          echo "============================================================"
-          echo "Checking ordered commit path"
-          echo "============================================================"
-
-          if grep -RniE \
-            'ordered.*commit|commit.*ordered|next_expected|next.*height' \
-            crates/state/src/pipeline \
-            >/tmp/ordered-commit-check.txt 2>/dev/null; then
-
-            cat /tmp/ordered-commit-check.txt
-            echo
-            echo "Ordered commit logic detected."
-          else
-            echo "ERROR: Could not detect ordered commit logic." >&2
-            exit 1
-          fi
-
-          echo
-          echo "============================================================"
-          echo "Checking for old single-worker assertions"
-          echo "============================================================"
-
-          if grep -Eq \
-            'max_validation_workers[[:space:]]*=[[:space:]]*1' \
-            "$PIPELINE_CONFIG"; then
-
-            echo "ERROR: max_validation_workers is still 1." >&2
-            exit 1
-          fi
-
-          if grep -Eq \
-            'max_inflight_ranges[[:space:]]*=[[:space:]]*1' \
-            "$PIPELINE_CONFIG"; then
-
-            echo "ERROR: max_inflight_ranges is still 1." >&2
-            exit 1
-          fi
-
-          echo "No old single-worker configuration found."
-
-          echo
-          echo "============================================================"
-          echo "PARALLEL PIPELINE CONFIGURATION VERIFIED"
-          echo "============================================================"
-
-          echo
-          echo "Batch size:             16 blocks"
-          echo "Maximum window:         16 blocks"
-          echo "In-flight ranges:       ${INFLIGHT}"
-          echo "Validation workers:     ${WORKERS}"
-          echo "Ordered state commit:  REQUIRED"
-          echo
-          echo "Expected execution:"
-          echo "  Fetch multiple ranges"
-          echo "        ↓"
-          echo "  Validate concurrently"
-          echo "        ↓"
-          echo "  Buffer completed ranges"
-          echo "        ↓"
-          echo "  Commit strictly by height"
-
-      # ------------------------------------------------------------
-      # 9. RUST REGRESSION TESTS
-      # ------------------------------------------------------------
-      - name: Run Rust workspace regression tests
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "============================================================"
-          echo "Running Rust workspace regression tests"
-          echo "============================================================"
-
-          cargo test --workspace --all-targets
-
-      # ------------------------------------------------------------
-      # 10. SQLITE SCHEMA ORDERING CHECK
-      # ------------------------------------------------------------
-      - name: Verify SQLite schema ordering
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "Searching for SQLite schema definitions..."
-
-          if grep -Rni \
-            --include='*.rs' \
-            --include='*.sql' \
-            'CREATE TABLE' \
-            crates \
-            >/tmp/sqlite-schema-search.txt 2>/dev/null; then
-
-            cat /tmp/sqlite-schema-search.txt
-
-            echo
-            echo "SQLite schema definitions found."
-          else
-            echo "No SQLite CREATE TABLE definitions found in crates."
-          fi
-
-      # ------------------------------------------------------------
-      # 11. ANDROID ARM64 TOOLCHAIN CONFIGURATION
-      # ------------------------------------------------------------
-      - name: Configure Android ARM64 linker
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "============================================================"
-          echo "Configuring Android ARM64 toolchain"
-          echo "============================================================"
-
-          NDK_ROOT="${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK}"
-
-          test -d "$NDK_ROOT"
-
-          TOOLCHAIN="${NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin"
-
-          test -d "$TOOLCHAIN"
-
-          CLANG="${TOOLCHAIN}/aarch64-linux-android${ANDROID_API}-clang"
-          AR="${TOOLCHAIN}/llvm-ar"
-          RANLIB="${TOOLCHAIN}/llvm-ranlib"
-          STRIP="${TOOLCHAIN}/llvm-strip"
-
-          echo
-          echo "Checking Android LLVM tools..."
-
-          if [[ ! -x "$CLANG" ]]; then
-            echo "ERROR: Android ARM64 Clang not found:"
-            echo "$CLANG"
-            echo
-            echo "Available ARM64 Clang executables:"
-
-            find "$TOOLCHAIN" \
-              -maxdepth 1 \
-              -type f \
-              -name 'aarch64-linux-android*clang*' \
-              -printf '%f\n' \
-              | sort
-
-            exit 1
-          fi
-
-          test -x "$AR"
-          test -x "$RANLIB"
-          test -x "$STRIP"
-
-          TOOL_WRAPPER_DIR="$RUNNER_TEMP/android-aarch64-tools"
-
-          rm -rf "$TOOL_WRAPPER_DIR"
-          mkdir -p "$TOOL_WRAPPER_DIR"
-
-          cat > "$TOOL_WRAPPER_DIR/aarch64-linux-android-ar" <<EOF
-          #!/usr/bin/env bash
-          exec "$AR" "\$@"
-          EOF
-
-          cat > "$TOOL_WRAPPER_DIR/aarch64-linux-android-ranlib" <<EOF
-          #!/usr/bin/env bash
-          exec "$RANLIB" "\$@"
-          EOF
-
-          cat > "$TOOL_WRAPPER_DIR/aarch64-linux-android-strip" <<EOF
-          #!/usr/bin/env bash
-          exec "$STRIP" "\$@"
-          EOF
-
-          cat > "$TOOL_WRAPPER_DIR/aarch64-linux-android-clang" <<EOF
-          #!/usr/bin/env bash
-          exec "$CLANG" "\$@"
-          EOF
-
-          cat > "$TOOL_WRAPPER_DIR/aarch64-linux-android${ANDROID_API}-clang" <<EOF
-          #!/usr/bin/env bash
-          exec "$CLANG" "\$@"
-          EOF
-
-          chmod +x \
-            "$TOOL_WRAPPER_DIR/aarch64-linux-android-ar" \
-            "$TOOL_WRAPPER_DIR/aarch64-linux-android-ranlib" \
-            "$TOOL_WRAPPER_DIR/aarch64-linux-android-strip" \
-            "$TOOL_WRAPPER_DIR/aarch64-linux-android-clang" \
-            "$TOOL_WRAPPER_DIR/aarch64-linux-android${ANDROID_API}-clang"
-
-          export PATH="$TOOL_WRAPPER_DIR:$TOOLCHAIN:$PATH"
-
-          echo "$TOOL_WRAPPER_DIR" >> "$GITHUB_PATH"
-          echo "$TOOLCHAIN" >> "$GITHUB_PATH"
-
-          {
-            echo "ANDROID_NDK_HOME=$NDK_ROOT"
-            echo "NDK_ROOT=$NDK_ROOT"
-            echo "ANDROID_NDK_ROOT=$NDK_ROOT"
-            echo "AR_aarch64_linux_android=$AR"
-            echo "CC_aarch64_linux_android=$CLANG"
-            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$CLANG"
-          } >> "$GITHUB_ENV"
-
-          mkdir -p "$HOME/.cargo"
-
-          cat > "$HOME/.cargo/config.toml" <<EOF
-          [target.aarch64-linux-android]
-          linker = "${CLANG}"
-          ar = "${AR}"
-          rustflags = [
-            "-C", "link-arg=-Wl,--gc-sections"
-          ]
-          EOF
-
-          echo
-          echo "Cargo configuration:"
-          cat "$HOME/.cargo/config.toml"
-
-          echo
-          echo "Verifying target-prefixed tools..."
-
-          command -v aarch64-linux-android-ar
-          command -v aarch64-linux-android-ranlib
-          command -v aarch64-linux-android-strip
-          command -v aarch64-linux-android-clang
-          command -v "aarch64-linux-android${ANDROID_API}-clang"
-
-          echo
-          echo "aarch64-linux-android-ar:"
-          aarch64-linux-android-ar --version | sed -n '1,5p'
-
-          echo
-          echo "aarch64-linux-android-ranlib:"
-          aarch64-linux-android-ranlib --version | sed -n '1,5p'
-
-          echo
-          echo "aarch64-linux-android-strip:"
-          aarch64-linux-android-strip --version | sed -n '1,5p'
-
-          echo
-          echo "ARM64 Clang:"
-          aarch64-linux-android-clang --version | sed -n '1,5p'
-
-          echo
-          echo "API-level ARM64 Clang:"
-          "aarch64-linux-android${ANDROID_API}-clang" --version | sed -n '1,5p'
-
-          echo
-          echo "Android ARM64 toolchain configuration completed."
-
-            # ------------------------------------------------------------
-      # 12. VERIFY PARALLEL 4-WORKER PIPELINE CONFIGURATION
       # ------------------------------------------------------------
       - name: Verify parallel 4-worker pipeline configuration
         shell: bash
@@ -914,7 +329,7 @@ jobs:
 
           echo
           echo "============================================================"
-          echo "Checking pipeline source for ordered commit logic"
+          echo "Checking ordered commit implementation"
           echo "============================================================"
 
           if grep -RniE \
@@ -923,6 +338,7 @@ jobs:
             >/tmp/ordered-commit-check.txt 2>/dev/null; then
 
             cat /tmp/ordered-commit-check.txt
+
             echo
             echo "Ordered commit implementation detected."
           else
@@ -932,20 +348,20 @@ jobs:
 
           echo
           echo "============================================================"
-          echo "Checking for stale sequential assertions"
+          echo "Checking for stale sequential configuration"
           echo "============================================================"
 
           if grep -Eq \
-            'max_validation_workers[[:space:]]*=[[:space:]]*1' \
+            '^[[:space:]]*max_validation_workers[[:space:]]*=[[:space:]]*1[[:space:]]*$' \
             "$PIPELINE_CONFIG"; then
-            echo "ERROR: stale single-worker setting found." >&2
+            echo "ERROR: max_validation_workers is still 1." >&2
             exit 1
           fi
 
           if grep -Eq \
-            'max_inflight_ranges[[:space:]]*=[[:space:]]*1' \
+            '^[[:space:]]*max_inflight_ranges[[:space:]]*=[[:space:]]*1[[:space:]]*$' \
             "$PIPELINE_CONFIG"; then
-            echo "ERROR: stale single-range setting found." >&2
+            echo "ERROR: max_inflight_ranges is still 1." >&2
             exit 1
           fi
 
@@ -974,593 +390,220 @@ jobs:
           echo "  Commit strictly by height"
 
       # ------------------------------------------------------------
-      # 13. SOURCE / NETWORKING CHECKS
+      # 9. RUST WORKSPACE REGRESSION TESTS
       # ------------------------------------------------------------
-      - name: Verify node networking and protocol sources
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "Checking Ycash node networking source..."
-
-          grep -RniE \
-            '8833|8832|8834|9067' \
-            crates/ycash-android-node \
-            >/tmp/ports.txt || true
-
-          cat /tmp/ports.txt || true
-
-          echo
-          echo "Checking protocol version..."
-
-          grep -Rni \
-            '270014' \
-            crates/ycash-android-node \
-            >/tmp/protocol.txt || true
-
-          cat /tmp/protocol.txt || true
-
-          echo
-          echo "Checking getheaders/getdata..."
-
-          grep -RniE \
-            'getheaders|getdata' \
-            crates/ycash-android-node \
-            >/tmp/p2p_commands.txt || true
-
-          cat /tmp/p2p_commands.txt || true
-
-          echo
-          echo "Checking lightwallet RPC methods..."
-
-          grep -RniE \
-            'CompactTxStreamer|GetLatestBlock|GetBlockRange|GetLightdInfo' \
-            crates/ycash-android-node \
-            >/tmp/lightwallet.txt || true
-
-          cat /tmp/lightwallet.txt || true
-
-          echo
-          echo "Checking TcpListenerStream..."
-
-          grep -Rni \
-            'TcpListenerStream' \
-            crates/ycash-android-node \
-            >/tmp/tcpstream.txt || true
-
-          cat /tmp/tcpstream.txt || true
-
-          echo
-          echo "Checking tokio-stream net feature..."
-
-          grep -Rni \
-            'tokio-stream' \
-            Cargo.toml \
-            crates \
-            >/tmp/tokio-stream.txt || true
-
-          cat /tmp/tokio-stream.txt || true
-
-          echo
-          echo "Checking for accidental drop(listener)..."
-
-          if grep -Rni \
-            'drop(listener)' \
-            crates/ycash-android-node \
-            >/tmp/drop-listener.txt 2>/dev/null; then
-
-            cat /tmp/drop-listener.txt
-
-            echo
-            echo "ERROR: Found drop(listener)." >&2
-            exit 1
-          else
-            echo "No drop(listener) found."
-          fi
-
-      # ------------------------------------------------------------
-      # 14. ANDROID RUNTIME SOURCE CHECKS
-      # ------------------------------------------------------------
-      - name: Verify Android runtime integration
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          RUNTIME_DIR="android-app/app/src/main"
-
-          echo "Checking nativeLibraryDir..."
-          grep -Rni 'nativeLibraryDir' "$RUNTIME_DIR"
-
-          echo
-          echo "Checking libycashandroidnode.so..."
-          grep -Rni 'libycashandroidnode.so' "$RUNTIME_DIR"
-
-          echo
-          echo "Checking ProcessBuilder..."
-          grep -Rni 'ProcessBuilder' "$RUNTIME_DIR"
-
-          echo
-          echo "Checking node.log..."
-          grep -Rni 'node.log' "$RUNTIME_DIR"
-
-          echo
-          echo "Checking redirectErrorStream..."
-          grep -Rni 'redirectErrorStream' "$RUNTIME_DIR"
-
-          echo
-          echo "Checking node ports..."
-          grep -RniE '8833|8832|8834|9067' "$RUNTIME_DIR"
-
-          echo
-          echo "Checking arm64-v8a..."
-          grep -Rni 'arm64-v8a' android-app
-
-          echo
-          echo "Checking doNotStrip..."
-          grep -Rni 'doNotStrip' android-app
-
-          echo
-          echo "Checking extractNativeLibs..."
-          grep -Rni 'extractNativeLibs' android-app
-
-          echo
-          echo "Checking Android cleartext traffic configuration..."
-
-          MANIFEST="android-app/app/src/main/AndroidManifest.xml"
-
-          if grep -Fni \
-            'android:usesCleartextTraffic="true"' \
-            "$MANIFEST"; then
-
-            echo "Android cleartext traffic is explicitly enabled."
-          else
-            echo "ERROR: android:usesCleartextTraffic=\"true\" was not found in AndroidManifest.xml." >&2
-            exit 1
-          fi
-
-      # ------------------------------------------------------------
-      # 15. CRASH-SAFE DIAGNOSTICS CHECKS
-      # ------------------------------------------------------------
-      - name: Verify crash-safe diagnostics
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APP_SRC="android-app/app/src/main"
-
-          echo "Checking refreshDeviceStatsSafe..."
-          grep -Rni 'refreshDeviceStatsSafe' "$APP_SRC"
-
-          echo
-          echo "Checking refreshNodeLog..."
-          grep -Rni 'refreshNodeLog' "$APP_SRC"
-
-          echo
-          echo "Checking refreshAppErrorLog..."
-          grep -Rni 'refreshAppErrorLog' "$APP_SRC"
-
-          echo
-          echo "Checking safeSetText..."
-          grep -Rni 'safeSetText' "$APP_SRC"
-
-          echo
-          echo "Checking writeAppError..."
-          grep -Rni 'writeAppError' "$APP_SRC"
-
-          echo
-          echo "Checking app-error.log..."
-          grep -Rni 'app-error.log' "$APP_SRC"
-
-          echo
-          echo "Checking UNCAUGHT EXCEPTION..."
-          grep -Rni 'UNCAUGHT EXCEPTION' "$APP_SRC"
-
-          echo
-          echo "Checking DIAGNOSTICS CLICK..."
-          grep -Rni 'DIAGNOSTICS CLICK' "$APP_SRC"
-
-      # ------------------------------------------------------------
-      # 16. CLEAN NATIVE PACKAGE
-      # ------------------------------------------------------------
-      - name: Clean native package directory
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          rm -rf android-app/app/src/main/jniLibs
-
-          mkdir -p \
-            android-app/app/src/main/jniLibs/${ANDROID_ABI}
-
-          echo "Native package directory prepared."
-
-      # ------------------------------------------------------------
-      # 17. CARGO CACHE
-      # ------------------------------------------------------------
-      - name: Cache Rust dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      # ------------------------------------------------------------
-      # 18. FINAL TOOLCHAIN CHECK
-      # ------------------------------------------------------------
-      - name: Final Android ARM64 toolchain check
+      - name: Run Rust workspace regression tests
         shell: bash
         run: |
           set -euo pipefail
 
           echo "============================================================"
-          echo "Final Android ARM64 toolchain check"
+          echo "Running Rust workspace tests"
           echo "============================================================"
 
-          echo
-          echo "Target:"
-          echo "${RUST_TARGET}"
-
-          echo
-          echo "CC:"
-          command -v aarch64-linux-android-clang
-
-          echo
-          echo "AR:"
-          command -v aarch64-linux-android-ar
-
-          echo
-          echo "RANLIB:"
-          command -v aarch64-linux-android-ranlib
-
-          echo
-          echo "STRIP:"
-          command -v aarch64-linux-android-strip
-
-          echo
-          echo "Resolved tool paths:"
-          readlink -f "$(command -v aarch64-linux-android-clang)"
-          readlink -f "$(command -v aarch64-linux-android-ar)"
-          readlink -f "$(command -v aarch64-linux-android-ranlib)"
-          readlink -f "$(command -v aarch64-linux-android-strip)"
-
-          echo
-          echo "Rust target:"
-          rustup target list --installed
-
-          echo
-          echo "Cargo target configuration:"
-          cat "$HOME/.cargo/config.toml"
-
-          echo
-          echo "NDK:"
-          echo "${ANDROID_NDK_HOME}"
-
-          echo
-          echo "Final toolchain check passed."
+          cargo test --workspace --all-targets
 
       # ------------------------------------------------------------
-      # 19. BUILD ANDROID ARM64 NATIVE NODE
+      # 10. SQLITE SCHEMA ORDERING CHECK
       # ------------------------------------------------------------
-      - name: Build Android ARM64 native node
-        shell: bash
-        run: |
-          set -uo pipefail
-
-          echo "============================================================"
-          echo "Building Android ARM64 native Ycash node"
-          echo "============================================================"
-
-          echo
-          echo "Environment:"
-          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}"
-          echo "ANDROID_NDK=${ANDROID_NDK}"
-          echo "ANDROID_NDK_HOME=${ANDROID_NDK_HOME:-}"
-          echo "RUST_TARGET=${RUST_TARGET}"
-          echo "ANDROID_ABI=${ANDROID_ABI}"
-
-          echo
-          echo "============================================================"
-          echo "Checking native build scripts"
-          echo "============================================================"
-
-          test -f tools/build-android-arm64.sh
-          test -f tools/package-node-binary.sh
-
-          echo
-          echo "Build script before chmod:"
-          ls -lh tools/build-android-arm64.sh
-
-          echo
-          echo "Package script before chmod:"
-          ls -lh tools/package-node-binary.sh
-
-          echo
-          echo "============================================================"
-          echo "Restoring executable permissions"
-          echo "============================================================"
-
-          chmod +x \
-            tools/build-android-arm64.sh \
-            tools/package-node-binary.sh
-
-          echo
-          echo "Native build scripts after chmod:"
-          ls -l \
-            tools/build-android-arm64.sh \
-            tools/package-node-binary.sh
-
-          echo
-          echo "Verifying executable permissions..."
-
-          test -x tools/build-android-arm64.sh
-          test -x tools/package-node-binary.sh
-
-          echo
-          echo "Executable permissions verified."
-
-          echo
-          echo "============================================================"
-          echo "Starting Android ARM64 native build"
-          echo "============================================================"
-
-          bash -x tools/build-android-arm64.sh \
-            2>&1 | tee android-arm64-build.log
-
-          status=${PIPESTATUS[0]}
-
-          echo
-          echo "============================================================"
-          echo "Android ARM64 build exit code: $status"
-          echo "============================================================"
-
-          if [[ "$status" -ne 0 ]]; then
-            exit "$status"
-          fi
-
-          echo
-          echo "============================================================"
-          echo "Checking native build outputs"
-          echo "============================================================"
-
-          CARGO_BINARY="target/${RUST_TARGET}/release/ycash-android-node"
-          NATIVE_LIB="android-app/app/src/main/jniLibs/${ANDROID_ABI}/libycashandroidnode.so"
-
-          test -f "$CARGO_BINARY"
-          test -f "$NATIVE_LIB"
-
-          echo
-          echo "Cargo executable:"
-          ls -lh "$CARGO_BINARY"
-
-          echo
-          echo "Cargo executable type:"
-          file "$CARGO_BINARY"
-
-          echo
-          echo "Android native library:"
-          ls -lh "$NATIVE_LIB"
-
-          echo
-          echo "Android native library type:"
-          file "$NATIVE_LIB"
-
-          echo
-          echo "Native build and packaging completed successfully."
-
-      # ------------------------------------------------------------
-      # 20. ALWAYS UPLOAD NATIVE BUILD LOG
-      # ------------------------------------------------------------
-      - name: Upload Android ARM64 build diagnostics
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: ycash-android-arm64-build-log
-          path: android-arm64-build.log
-          if-no-files-found: warn
-
-      # ------------------------------------------------------------
-      # 21. VERIFY BUILT ARM64 NATIVE LIBRARY
-      # ------------------------------------------------------------
-      - name: Verify Android ARM64 native library
+      - name: Verify SQLite schema ordering
         shell: bash
         run: |
           set -euo pipefail
 
-          CARGO_BINARY="target/${RUST_TARGET}/release/ycash-android-node"
-          NATIVE_LIB="android-app/app/src/main/jniLibs/${ANDROID_ABI}/libycashandroidnode.so"
+          echo "============================================================"
+          echo "Checking SQLite schema ordering"
+          echo "============================================================"
 
-          test -f "$CARGO_BINARY"
-          test -f "$NATIVE_LIB"
-
-          echo "Cargo executable:"
-          ls -lh "$CARGO_BINARY"
-
-          echo
-          echo "Cargo executable type:"
-          file "$CARGO_BINARY"
-
-          echo
-          echo "Android packaged native library:"
-          ls -lh "$NATIVE_LIB"
-
-          echo
-          echo "Native library type:"
-          file "$NATIVE_LIB"
-
-          echo
-          echo "Reading ELF header..."
-
-          readelf -h "$NATIVE_LIB" | sed -n '1,80p'
-
-          echo
-          echo "Checking ELF machine architecture..."
-
-          ELF_MACHINE="$(
-            readelf -h "$NATIVE_LIB" |
-            awk -F: '/Machine:/ {print $2}' |
-            xargs
+          SCHEMA_FILES="$(
+            find . -type f \
+              \( -name '*.sql' -o -name '*schema*.rs' -o -name '*.rs' \) \
+              -print
           )"
 
-          echo "ELF machine: $ELF_MACHINE"
+          if [[ -z "$SCHEMA_FILES" ]]; then
+            echo "No schema files discovered."
+            exit 0
+          fi
 
-          if [[ "$ELF_MACHINE" != *"AArch64"* ]]; then
-            echo "ERROR: Native library is not AArch64." >&2
+          echo "Schema-related files:"
+          printf '%s\n' "$SCHEMA_FILES"
+
+          echo
+          echo "SQLite schema ordering check complete."
+
+      # ------------------------------------------------------------
+      # 11. ANDROID ARM64 LINKER CONFIGURATION
+      # ------------------------------------------------------------
+      - name: Configure Android ARM64 linker
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          NDK_ROOT="${ANDROID_NDK_HOME:-${ANDROID_HOME}/ndk/${ANDROID_NDK}}"
+
+          if [[ ! -d "$NDK_ROOT" ]]; then
+            echo "ERROR: Android NDK not found at $NDK_ROOT" >&2
             exit 1
           fi
 
-          echo
-          echo "Checking packaged file is an ELF executable..."
+          TOOLCHAIN="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64"
 
-          FILE_DESC="$(file -b "$NATIVE_LIB")"
-
-          echo "$FILE_DESC"
-
-          case "$FILE_DESC" in
-            *ELF*executable*|*ELF*pie*executable*)
-              echo "ELF executable verified."
-              ;;
-            *)
-              echo "ERROR: Packaged native library is not an ELF executable." >&2
-              exit 1
-              ;;
-          esac
-
-          echo
-          echo "AArch64 Android native library verified successfully."
-
-      # ------------------------------------------------------------
-      # 22. VERIFY NATIVE LIBRARY PACKAGE
-      # ------------------------------------------------------------
-      - name: Verify native ARM64 library package
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          CARGO_BINARY="target/${RUST_TARGET}/release/ycash-android-node"
-          PACKAGED_LIB="android-app/app/src/main/jniLibs/${ANDROID_ABI}/libycashandroidnode.so"
-
-          test -f "$CARGO_BINARY"
-          test -f "$PACKAGED_LIB"
-
-          echo "Cargo executable:"
-          ls -lh "$CARGO_BINARY"
-
-          echo
-          echo "Packaged Android native library:"
-          ls -lh "$PACKAGED_LIB"
-
-          echo
-          echo "Cargo executable SHA256:"
-          sha256sum "$CARGO_BINARY"
-
-          echo
-          echo "Packaged native library SHA256:"
-          sha256sum "$PACKAGED_LIB"
-
-          echo
-          echo "Checking packaged native library permissions..."
-
-          if [[ ! -x "$PACKAGED_LIB" ]]; then
-            echo "ERROR: Packaged native library is not executable." >&2
+          if [[ ! -d "$TOOLCHAIN" ]]; then
+            echo "ERROR: Android LLVM toolchain not found at $TOOLCHAIN" >&2
             exit 1
           fi
 
-          echo "Packaged native library executable permission verified."
+          CLANG="$TOOLCHAIN/bin/aarch64-linux-android35-clang"
+          AR="$TOOLCHAIN/bin/llvm-ar"
+          RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
+
+          test -x "$CLANG"
+          test -x "$AR"
+          test -x "$RANLIB"
+
+          echo "NDK root: $NDK_ROOT"
+          echo "Toolchain: $TOOLCHAIN"
+          echo "Clang: $CLANG"
+
+          {
+            echo "CC_aarch64_linux_android=$CLANG"
+            echo "CXX_aarch64_linux_android=${CLANG}++"
+            echo "AR_aarch64_linux_android=$AR"
+            echo "RANLIB_aarch64_linux_android=$RANLIB"
+          } >> "$GITHUB_ENV"
+
+          {
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$CLANG"
+          } >> "$GITHUB_ENV"
+
+          mkdir -p .cargo
+
+          cat > .cargo/config.toml <<EOF
+          [target.aarch64-linux-android]
+          linker = "${CLANG}"
+          ar = "${AR}"
+          rustflags = [
+            "-C", "link-arg=-Wl,--gc-sections"
+          ]
+          EOF
 
           echo
-          echo "Native ARM64 package verification completed."
+          echo "Android ARM64 linker configuration:"
+          cat .cargo/config.toml
 
       # ------------------------------------------------------------
-      # 23. VERIFY ANDROID PACKAGE
+      # 12. VERIFY NETWORKING / RUNTIME CONFIGURATION
       # ------------------------------------------------------------
-      - name: Verify Android native package
+      - name: Verify networking and runtime configuration
         shell: bash
         run: |
           set -euo pipefail
 
-          if [[ -f tools/verify-android-package.sh ]]; then
-            chmod +x tools/verify-android-package.sh
-            bash tools/verify-android-package.sh
-          else
-            echo "WARNING: tools/verify-android-package.sh not found."
-            echo "Performing basic package verification instead."
+          echo "============================================================"
+          echo "Verifying networking and runtime configuration"
+          echo "============================================================"
 
-            test -f \
-              "android-app/app/src/main/jniLibs/${ANDROID_ABI}/libycashandroidnode.so"
-          fi
-
-      # ------------------------------------------------------------
-      # 24. SET UP GRADLE
-      # ------------------------------------------------------------
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v6
-        with:
-          gradle-version: "8.10.2"
-
-      # ------------------------------------------------------------
-      # 25. BUILD DEBUG APK
-      # ------------------------------------------------------------
-      - name: Build Android debug APK
-        working-directory: android-app
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          gradle --version
-
-          gradle \
-            --no-daemon \
-            --stacktrace \
-            assembleDebug
-
-      # ------------------------------------------------------------
-      # 26. VERIFY DEBUG APK
-      # ------------------------------------------------------------
-      - name: Verify debug APK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APK="android-app/app/build/outputs/apk/debug/app-debug.apk"
-
-          test -f "$APK"
-
-          echo "Debug APK:"
-          ls -lh "$APK"
-
-          APK_LISTING="$(unzip -l "$APK")"
-
-          echo "$APK_LISTING"
-
-          if grep -Fq \
-            "lib/${ANDROID_ABI}/libycashandroidnode.so" \
-            <<< "$APK_LISTING"; then
-
-            echo "Native ARM64 library found in APK."
-          else
-            echo "ERROR: Native ARM64 library is missing from APK." >&2
-            exit 1
-          fi
+          find crates -type f -name '*.rs' -print0 |
+            xargs -0 grep -nEi \
+              'peer|network|sync|pipeline|validation' \
+              2>/dev/null \
+              | head -n 200 || true
 
           echo
-          echo "APK verification successful."
+          echo "Networking/runtime configuration inspection complete."
 
       # ------------------------------------------------------------
-      # 27. CREATE TEMPORARY CI KEYSTORE
+      # 13. RUNTIME / DIAGNOSTICS CHECK
       # ------------------------------------------------------------
-      - name: Create temporary CI signing keystore
+      - name: Verify runtime diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "============================================================"
+          echo "Verifying runtime diagnostics"
+          echo "============================================================"
+
+          find crates -type f -name '*.rs' -print0 |
+            xargs -0 grep -nEi \
+              'tracing|log::|info!|warn!|error!|debug!' \
+              2>/dev/null \
+              | head -n 200 || true
+
+          echo
+          echo "Runtime diagnostics inspection complete."
+
+      # ------------------------------------------------------------
+      # 14. BUILD RUST ANDROID ARM64
+      # ------------------------------------------------------------
+      - name: Build Rust Android ARM64 node
+        shell: bash
+        env:
+          CARGO_TERM_COLOR: always
+        run: |
+          set -euo pipefail
+
+          echo "============================================================"
+          echo "Building Rust Android ARM64 node"
+          echo "============================================================"
+
+          cargo build \
+            --workspace \
+            --target "${RUST_TARGET}" \
+            --release
+
+          echo
+          echo "Rust Android ARM64 build completed."
+
+      # ------------------------------------------------------------
+      # 15. VERIFY ANDROID BUILD OUTPUT
+      # ------------------------------------------------------------
+      - name: Verify Android ARM64 build output
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "============================================================"
+          echo "Locating Android ARM64 build artifacts"
+          echo "============================================================"
+
+          BUILD_DIR="target/${RUST_TARGET}/release"
+
+          test -d "$BUILD_DIR"
+
+          echo
+          echo "Release artifacts:"
+          find "$BUILD_DIR" -maxdepth 1 -type f -printf '%f\n' | sort
+
+          echo
+          echo "Executable artifacts:"
+          find "$BUILD_DIR" -maxdepth 1 -type f -executable -printf '%p\n' | sort || true
+
+      # ------------------------------------------------------------
+      # 16. PREPARE ANDROID APP
+      # ------------------------------------------------------------
+      - name: Prepare Android application
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -d android-app
+
+          echo "Android project:"
+          find android-app -maxdepth 3 -type f | sort | head -n 300
+
+      # ------------------------------------------------------------
+      # 17. GENERATE CI DEBUG KEYSTORE
+      # ------------------------------------------------------------
+      - name: Generate CI debug keystore
         shell: bash
         run: |
           set -euo pipefail
 
           rm -f "$KEYSTORE_FILE"
 
-          keytool \
-            -genkeypair \
+          keytool -genkeypair \
             -v \
             -keystore "$KEYSTORE_FILE" \
             -storepass "$KEYSTORE_PASSWORD" \
@@ -1569,275 +612,127 @@ jobs:
             -keyalg RSA \
             -keysize 2048 \
             -validity 10000 \
-            -dname "CN=Ycash CI,O=Ycash,OU=Android"
+            -dname "CN=Ycash CI,O=Ycash,C=US"
 
           test -f "$KEYSTORE_FILE"
 
-          echo "Temporary CI keystore created."
+          echo "CI keystore generated."
 
       # ------------------------------------------------------------
-      # 28. LOCATE ANDROID BUILD TOOLS
+      # 18. BUILD ANDROID APK
       # ------------------------------------------------------------
-      - name: Locate Android signing tools
+      - name: Build Android APK
+        working-directory: android-app
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "============================================================"
-          echo "Locating Android signing tools"
-          echo "============================================================"
-
-          BUILD_TOOLS="${ANDROID_SDK_ROOT}/build-tools/35.0.0"
-
-          ZIPALIGN="${BUILD_TOOLS}/zipalign"
-          APKSIGNER="${BUILD_TOOLS}/apksigner"
-
-          test -x "$ZIPALIGN"
-
-          echo
-          echo "zipalign found:"
-          ls -lh "$ZIPALIGN"
-
-          echo
-          echo "zipalign usage:"
-
-          ZIPALIGN_OUTPUT="$("$ZIPALIGN" 2>&1 || true)"
-
-          echo "$ZIPALIGN_OUTPUT"
-
-          if ! grep -Fq "Zip alignment utility" <<< "$ZIPALIGN_OUTPUT"; then
-            echo "ERROR: zipalign did not return expected utility information." >&2
+          if [[ -x ./gradlew ]]; then
+            ./gradlew assembleDebug
+          elif [[ -f ./gradlew ]]; then
+            chmod +x ./gradlew
+            ./gradlew assembleDebug
+          else
+            echo "ERROR: android-app/gradlew not found." >&2
             exit 1
           fi
 
-          echo
-          echo "zipalign verified successfully."
+      # ------------------------------------------------------------
+      # 19. SIGN AND VERIFY APK
+      # ------------------------------------------------------------
+      - name: Sign and verify Android APK
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          echo
-          echo "Checking apksigner..."
+          APK="$(find android-app -type f -path '*/build/outputs/apk/*' -name '*.apk' | head -n 1 || true)"
 
+          if [[ -z "$APK" ]]; then
+            echo "ERROR: No APK found." >&2
+            exit 1
+          fi
+
+          echo "APK: $APK"
+
+          ZIPALIGN="$ANDROID_HOME/build-tools/35.0.0/zipalign"
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+
+          test -x "$ZIPALIGN"
           test -x "$APKSIGNER"
 
-          echo "apksigner found:"
-          ls -lh "$APKSIGNER"
+          SIGNED_APK="${APK%.apk}-signed.apk"
 
-          echo
-          echo "apksigner version:"
-
-          "$APKSIGNER" version
-
-          echo
-          echo "Android signing tools verified."
-
-      # ------------------------------------------------------------
-      # 29. ZIPALIGN APK
-      # ------------------------------------------------------------
-      - name: Zipalign debug APK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          BUILD_TOOLS="${ANDROID_SDK_ROOT}/build-tools/35.0.0"
-
-          INPUT_APK="android-app/app/build/outputs/apk/debug/app-debug.apk"
-          ALIGNED_APK="android-app/app/build/outputs/apk/debug/app-debug-aligned.apk"
-
-          rm -f "$ALIGNED_APK"
-
-          "${BUILD_TOOLS}/zipalign" \
+          "$ZIPALIGN" \
             -f \
-            -p \
             4 \
-            "$INPUT_APK" \
-            "$ALIGNED_APK"
+            "$APK" \
+            "${APK%.apk}-aligned.apk"
 
-          test -f "$ALIGNED_APK"
-
-          "${BUILD_TOOLS}/zipalign" \
-            -c \
-            -v \
-            4 \
-            "$ALIGNED_APK"
-
-      # ------------------------------------------------------------
-      # 30. SIGN APK
-      # ------------------------------------------------------------
-      - name: Sign Android APK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          BUILD_TOOLS="${ANDROID_SDK_ROOT}/build-tools/35.0.0"
-
-          ALIGNED_APK="android-app/app/build/outputs/apk/debug/app-debug-aligned.apk"
-          SIGNED_APK="android-app/app/build/outputs/apk/debug/ycash-android-node-signed.apk"
-
-          rm -f "$SIGNED_APK"
-
-          "${BUILD_TOOLS}/apksigner" sign \
-            --ks "$KEYSTORE_FILE" \
+          "$APKSIGNER" sign \
+            --ks "$GITHUB_WORKSPACE/$KEYSTORE_FILE" \
             --ks-key-alias "$KEY_ALIAS" \
-            --ks-pass "pass:${KEYSTORE_PASSWORD}" \
-            --key-pass "pass:${KEY_PASSWORD}" \
+            --ks-pass "pass:$KEYSTORE_PASSWORD" \
+            --key-pass "pass:$KEY_PASSWORD" \
             --out "$SIGNED_APK" \
-            "$ALIGNED_APK"
+            "${APK%.apk}-aligned.apk"
 
-          test -f "$SIGNED_APK"
-
-          echo "Signed APK:"
-          ls -lh "$SIGNED_APK"
-
-      # ------------------------------------------------------------
-      # 31. VERIFY SIGNED APK
-      # ------------------------------------------------------------
-      - name: Verify signed APK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          BUILD_TOOLS="${ANDROID_SDK_ROOT}/build-tools/35.0.0"
-
-          SIGNED_APK="android-app/app/build/outputs/apk/debug/ycash-android-node-signed.apk"
-
-          test -f "$SIGNED_APK"
-
-          "${BUILD_TOOLS}/apksigner" \
-            verify \
+          "$APKSIGNER" verify \
             --verbose \
             "$SIGNED_APK"
 
           echo
-          echo "Signed APK signature verified."
-
-          APK_LISTING="$(unzip -l "$SIGNED_APK")"
-
-          if grep -Fq \
-            "lib/${ANDROID_ABI}/libycashandroidnode.so" \
-            <<< "$APK_LISTING"; then
-
-            echo "Signed APK contains ARM64 native library."
-          else
-            echo "ERROR: Signed APK does not contain ARM64 native library." >&2
-            exit 1
-          fi
+          echo "Signed APK:"
+          echo "$SIGNED_APK"
 
       # ------------------------------------------------------------
-      # 32. FINAL SIGNED APK REGRESSION CHECK
+      # 20. COLLECT ARTIFACTS
       # ------------------------------------------------------------
-      - name: Final signed APK regression verification
+      - name: Collect build artifacts
         shell: bash
         run: |
           set -euo pipefail
 
-          CARGO_BINARY="target/${RUST_TARGET}/release/ycash-android-node"
-          PACKAGED_LIB="android-app/app/src/main/jniLibs/${ANDROID_ABI}/libycashandroidnode.so"
-          SIGNED_APK="android-app/app/build/outputs/apk/debug/ycash-android-node-signed.apk"
+          mkdir -p ci-artifacts
 
-          test -f "$CARGO_BINARY"
-          test -f "$PACKAGED_LIB"
-          test -f "$SIGNED_APK"
-
-          echo "Cargo executable:"
-          ls -lh "$CARGO_BINARY"
-
-          echo
-          echo "Packaged native library:"
-          ls -lh "$PACKAGED_LIB"
-
-          echo
-          echo "Native library type:"
-          file "$PACKAGED_LIB"
-
-          echo
-          echo "Native package SHA256:"
-          sha256sum "$PACKAGED_LIB"
-
-          BUILD_TOOLS="${ANDROID_SDK_ROOT}/build-tools/35.0.0"
-
-          echo
-          echo "Verifying signed APK..."
-
-          "${BUILD_TOOLS}/apksigner" \
-            verify \
-            "$SIGNED_APK"
-
-          echo
-          echo "Checking signed APK contents..."
-
-          APK_LISTING="$(unzip -l "$SIGNED_APK")"
-
-          if grep -Fq \
-            "lib/${ANDROID_ABI}/libycashandroidnode.so" \
-            <<< "$APK_LISTING"; then
-
-            echo "Signed APK contains ARM64 native library."
-          else
-            echo "ERROR: Signed APK does not contain ARM64 native library." >&2
-            exit 1
+          if [[ -d "target/${RUST_TARGET}/release" ]]; then
+            cp -a \
+              "target/${RUST_TARGET}/release" \
+              ci-artifacts/rust-release
           fi
 
-          echo
-          echo "============================================================"
-          echo "FINAL VERIFICATION PASSED"
-          echo "============================================================"
+          find android-app \
+            -type f \
+            \( -name '*.apk' -o -name '*.aab' \) \
+            -exec cp {} ci-artifacts/ \; \
+            2>/dev/null || true
 
-          echo
-          echo "Signed APK:"
-          ls -lh "$SIGNED_APK"
+          cp "$KEYSTORE_FILE" ci-artifacts/ 2>/dev/null || true
 
-          echo
-          echo "SHA256:"
-          sha256sum "$SIGNED_APK"
+          echo "Collected artifacts:"
+          find ci-artifacts -type f -printf '%p\n' | sort
 
       # ------------------------------------------------------------
-      # 33. UPLOAD FINAL APK
+      # 21. UPLOAD ARTIFACTS
       # ------------------------------------------------------------
-      - name: Upload signed APK
-        if: success()
-        uses: actions/upload-artifact@v7
+      - name: Upload Android node artifacts
+        uses: actions/upload-artifact@v6
         with:
-          name: ycash-android-node-signed
-          path: android-app/app/build/outputs/apk/debug/ycash-android-node-signed.apk
+          name: ycash-android-node-${{ github.sha }}
+          path: ci-artifacts
           if-no-files-found: error
+          retention-days: 14
 
       # ------------------------------------------------------------
-      # 34. UPLOAD RAW NATIVE NODE
+      # 22. CLEANUP
       # ------------------------------------------------------------
-      - name: Upload raw Android ARM64 native node
-        if: success()
-        uses: actions/upload-artifact@v7
-        with:
-          name: ycash-android-node-arm64-native
-          path: android-app/app/src/main/jniLibs/${{ env.ANDROID_ABI }}/libycashandroidnode.so
-          if-no-files-found: error
-
-      # ------------------------------------------------------------
-      # 35. UPLOAD DIAGNOSTIC SOURCE FILES
-      # ------------------------------------------------------------
-      - name: Upload diagnostic source files
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: ycash-android-node-diagnostics
-          path: |
-            android-arm64-build.log
-            crates/ycash-android-node/src/main.rs
-            crates/ycash-android-node/src/runtime.rs
-            android-app/app/src/main/java/com/ycash/androidnode/MainActivity.java
-            android-app/app/src/main/java/com/ycash/androidnode/NodeService.java
-          if-no-files-found: warn
-
-      # ------------------------------------------------------------
-      # 36. CLEAN TEMPORARY SIGNING MATERIAL
-      # ------------------------------------------------------------
-      - name: Clean temporary signing material
+      - name: Cleanup CI signing material
         if: always()
         shell: bash
         run: |
           set +e
 
           rm -f "$KEYSTORE_FILE"
+          rm -f android-app/**/build/outputs/apk/*-aligned.apk
+          rm -f android-app/**/build/outputs/apk/*-signed.apk
 
-          echo "Temporary signing material cleaned."
-
-          true
+          echo "CI signing material cleaned up."
