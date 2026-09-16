@@ -19,7 +19,7 @@ env:
   ANDROID_ABI: "arm64-v8a"
 
   # Temporary CI signing configuration.
-  # This keystore is generated during the workflow and is NOT a production key.
+  # Generated during the workflow and NOT a production key.
   KEYSTORE_FILE: "ci-debug.keystore"
   KEY_ALIAS: "ycash-ci"
   KEYSTORE_PASSWORD: "ycash-ci-password"
@@ -880,7 +880,7 @@ jobs:
             ${{ runner.os }}-cargo-
 
       # ------------------------------------------------------------
-      # 18. FINAL TOOLCHAIN CHECK BEFORE NATIVE BUILD
+      # 18. FINAL TOOLCHAIN CHECK
       # ------------------------------------------------------------
       - name: Final Android ARM64 toolchain check
         shell: bash
@@ -1020,17 +1020,11 @@ jobs:
           CARGO_BINARY="target/${RUST_TARGET}/release/ycash-android-node"
           NATIVE_LIB="android-app/app/src/main/jniLibs/${ANDROID_ABI}/libycashandroidnode.so"
 
+          test -f "$CARGO_BINARY"
+          test -f "$NATIVE_LIB"
+
           echo
-          echo "Expected Cargo executable:"
-          echo "$CARGO_BINARY"
-
-          if [[ ! -f "$CARGO_BINARY" ]]; then
-            echo "ERROR: Cargo executable was not produced:"
-            echo "$CARGO_BINARY"
-            exit 1
-          fi
-
-          echo "Cargo executable found:"
+          echo "Cargo executable:"
           ls -lh "$CARGO_BINARY"
 
           echo
@@ -1038,16 +1032,7 @@ jobs:
           file "$CARGO_BINARY"
 
           echo
-          echo "Expected Android native library:"
-          echo "$NATIVE_LIB"
-
-          if [[ ! -f "$NATIVE_LIB" ]]; then
-            echo "ERROR: Android native library was not packaged:"
-            echo "$NATIVE_LIB"
-            exit 1
-          fi
-
-          echo "Android native library found:"
+          echo "Android native library:"
           ls -lh "$NATIVE_LIB"
 
           echo
@@ -1079,16 +1064,10 @@ jobs:
           CARGO_BINARY="target/${RUST_TARGET}/release/ycash-android-node"
           NATIVE_LIB="android-app/app/src/main/jniLibs/${ANDROID_ABI}/libycashandroidnode.so"
 
-          echo "============================================================"
-          echo "Verifying Android ARM64 native output"
-          echo "============================================================"
-
-          echo
-          echo "Cargo executable:"
-          echo "$CARGO_BINARY"
-
           test -f "$CARGO_BINARY"
+          test -f "$NATIVE_LIB"
 
+          echo "Cargo executable:"
           ls -lh "$CARGO_BINARY"
 
           echo
@@ -1097,10 +1076,6 @@ jobs:
 
           echo
           echo "Android packaged native library:"
-          echo "$NATIVE_LIB"
-
-          test -f "$NATIVE_LIB"
-
           ls -lh "$NATIVE_LIB"
 
           echo
@@ -1198,9 +1173,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ -x tools/verify-android-package.sh ]]; then
-            bash tools/verify-android-package.sh
-          elif [[ -f tools/verify-android-package.sh ]]; then
+          if [[ -f tools/verify-android-package.sh ]]; then
+            chmod +x tools/verify-android-package.sh
             bash tools/verify-android-package.sh
           else
             echo "WARNING: tools/verify-android-package.sh not found."
@@ -1393,8 +1367,6 @@ jobs:
           echo "Signed APK signature verified."
 
           APK_LISTING="$(unzip -l "$SIGNED_APK")"
-
-          echo "$APK_LISTING"
 
           if grep -Fq \
             "lib/${ANDROID_ABI}/libycashandroidnode.so" \
