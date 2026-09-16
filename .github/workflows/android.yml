@@ -153,7 +153,7 @@ jobs:
           java -version
           javac -version
 
-            # ------------------------------------------------------------
+      # ------------------------------------------------------------
       # 5. ANDROID SDK / NDK
       # ------------------------------------------------------------
       - name: Set up Android SDK tools
@@ -177,7 +177,6 @@ jobs:
             "build-tools;35.0.0" \
             "ndk;${ANDROID_NDK}"
 
-          # Do not use `yes | ...` with pipefail enabled.
           set +o pipefail
           yes | sdkmanager --licenses >/dev/null
           set -o pipefail
@@ -207,10 +206,10 @@ jobs:
 
           echo
           echo "Android SDK verified."
-          echo "API:        ${ANDROID_API}"
+          echo "API:         ${ANDROID_API}"
           echo "Build tools: 35.0.0"
-          echo "NDK:        ${ANDROID_NDK}"
-          echo "ABI:        ${ANDROID_ABI}"
+          echo "NDK:         ${ANDROID_NDK}"
+          echo "ABI:         ${ANDROID_ABI}"
 
       # ------------------------------------------------------------
       # 6. RUST
@@ -652,7 +651,54 @@ jobs:
           echo "CI keystore generated."
 
       # ------------------------------------------------------------
-      # 18. BUILD ANDROID APK
+      # 18. SET UP GRADLE
+      # ------------------------------------------------------------
+      - name: Set up Gradle 8.10.2
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+
+      # ------------------------------------------------------------
+      # 19. GENERATE AND VERIFY GRADLE WRAPPER
+      # ------------------------------------------------------------
+      - name: Generate and verify Gradle wrapper
+        working-directory: android-app
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "============================================================"
+          echo "Checking Gradle wrapper"
+          echo "============================================================"
+
+          test -f ./gradlew
+          test -f ./gradle/wrapper/gradle-wrapper.properties
+
+          chmod +x ./gradlew
+
+          if [[ ! -f ./gradle/wrapper/gradle-wrapper.jar ]]; then
+            echo "Gradle wrapper JAR is missing."
+            echo "Generating Gradle 8.10.2 wrapper..."
+
+            gradle wrapper --gradle-version 8.10.2
+          else
+            echo "Gradle wrapper JAR already exists."
+          fi
+
+          test -f ./gradle/wrapper/gradle-wrapper.jar
+
+          echo
+          echo "Gradle wrapper verified:"
+          ls -lh \
+            ./gradlew \
+            ./gradle/wrapper/gradle-wrapper.properties \
+            ./gradle/wrapper/gradle-wrapper.jar
+
+          echo
+          echo "Gradle wrapper JAR successfully available."
+
+      # ------------------------------------------------------------
+      # 20. BUILD ANDROID APK
       # ------------------------------------------------------------
       - name: Build Android APK
         working-directory: android-app
@@ -660,18 +706,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ -x ./gradlew ]]; then
-            ./gradlew assembleDebug
-          elif [[ -f ./gradlew ]]; then
-            chmod +x ./gradlew
-            ./gradlew assembleDebug
-          else
-            echo "ERROR: android-app/gradlew not found." >&2
-            exit 1
-          fi
+          chmod +x ./gradlew
+
+          ./gradlew \
+            --no-daemon \
+            --stacktrace \
+            assembleDebug
 
       # ------------------------------------------------------------
-      # 19. SIGN AND VERIFY APK
+      # 21. SIGN AND VERIFY APK
       # ------------------------------------------------------------
       - name: Sign and verify Android APK
         shell: bash
@@ -694,12 +737,13 @@ jobs:
           test -x "$APKSIGNER"
 
           SIGNED_APK="${APK%.apk}-signed.apk"
+          ALIGNED_APK="${APK%.apk}-aligned.apk"
 
           "$ZIPALIGN" \
             -f \
             4 \
             "$APK" \
-            "${APK%.apk}-aligned.apk"
+            "$ALIGNED_APK"
 
           "$APKSIGNER" sign \
             --ks "$GITHUB_WORKSPACE/$KEYSTORE_FILE" \
@@ -707,7 +751,7 @@ jobs:
             --ks-pass "pass:$KEYSTORE_PASSWORD" \
             --key-pass "pass:$KEY_PASSWORD" \
             --out "$SIGNED_APK" \
-            "${APK%.apk}-aligned.apk"
+            "$ALIGNED_APK"
 
           "$APKSIGNER" verify \
             --verbose \
@@ -718,7 +762,7 @@ jobs:
           echo "$SIGNED_APK"
 
       # ------------------------------------------------------------
-      # 20. COLLECT ARTIFACTS
+      # 22. COLLECT ARTIFACTS
       # ------------------------------------------------------------
       - name: Collect build artifacts
         shell: bash
@@ -739,13 +783,14 @@ jobs:
             -exec cp {} ci-artifacts/ \; \
             2>/dev/null || true
 
-          cp "$KEYSTORE_FILE" ci-artifacts/ 2>/dev/null || true
+          # Do NOT upload the private CI keystore.
+          rm -f ci-artifacts/"$KEYSTORE_FILE"
 
           echo "Collected artifacts:"
           find ci-artifacts -type f -printf '%p\n' | sort
 
       # ------------------------------------------------------------
-      # 21. UPLOAD ARTIFACTS
+      # 23. UPLOAD ARTIFACTS
       # ------------------------------------------------------------
       - name: Upload Android node artifacts
         uses: actions/upload-artifact@v6
@@ -756,7 +801,7 @@ jobs:
           retention-days: 14
 
       # ------------------------------------------------------------
-      # 22. CLEANUP
+      # 24. CLEANUP
       # ------------------------------------------------------------
       - name: Cleanup CI signing material
         if: always()
