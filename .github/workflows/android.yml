@@ -1255,7 +1255,7 @@ jobs:
 
           echo "Temporary CI keystore created."
 
-      # ------------------------------------------------------------
+            # ------------------------------------------------------------
       # 28. LOCATE ANDROID BUILD TOOLS
       # ------------------------------------------------------------
       - name: Locate Android signing tools
@@ -1263,17 +1263,65 @@ jobs:
         run: |
           set -euo pipefail
 
+          echo "============================================================"
+          echo "Locating Android signing tools"
+          echo "============================================================"
+
           BUILD_TOOLS="${ANDROID_SDK_ROOT}/build-tools/35.0.0"
 
-          test -x "${BUILD_TOOLS}/zipalign"
-          test -x "${BUILD_TOOLS}/apksigner"
-
-          echo "zipalign:"
-          "${BUILD_TOOLS}/zipalign" -h | sed -n '1,20p'
+          ZIPALIGN="${BUILD_TOOLS}/zipalign"
+          APKSIGNER="${BUILD_TOOLS}/apksigner"
 
           echo
-          echo "apksigner:"
-          "${BUILD_TOOLS}/apksigner" version
+          echo "Build-tools directory:"
+          echo "$BUILD_TOOLS"
+
+          echo
+          echo "Checking zipalign..."
+
+          test -x "$ZIPALIGN"
+
+          echo "zipalign found:"
+          ls -lh "$ZIPALIGN"
+
+          echo
+          echo "============================================================"
+          echo "zipalign usage"
+          echo "============================================================"
+
+          # zipalign does NOT support -h.
+          # Running it without arguments prints its usage and exits non-zero.
+          ZIPALIGN_OUTPUT="$("$ZIPALIGN" 2>&1 || true)"
+
+          echo "$ZIPALIGN_OUTPUT"
+
+          if ! grep -Fq "Zip alignment utility" <<< "$ZIPALIGN_OUTPUT"; then
+            echo "ERROR: zipalign did not return expected utility information." >&2
+            exit 1
+          fi
+
+          echo
+          echo "zipalign verified successfully."
+
+          echo
+          echo "Checking apksigner..."
+
+          test -x "$APKSIGNER"
+
+          echo "apksigner found:"
+          ls -lh "$APKSIGNER"
+
+          echo
+          echo "============================================================"
+          echo "apksigner version"
+          echo "============================================================"
+
+          "$APKSIGNER" version
+
+          echo
+          echo "============================================================"
+          echo "Android signing tools verified"
+          echo "============================================================"
 
       # ------------------------------------------------------------
       # 29. ZIPALIGN APK
