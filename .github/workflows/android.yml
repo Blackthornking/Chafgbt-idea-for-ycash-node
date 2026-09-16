@@ -159,6 +159,71 @@ jobs:
           echo "Project extraction completed successfully."
 
       # ------------------------------------------------------------
+      # 2B. RESTORE PROJECT SCRIPT PERMISSIONS
+      #
+      # The Ycash project is distributed inside a ZIP archive.
+      # ZIP extraction can lose Unix executable permissions.
+      #
+      # Restore executable permissions for every shell script in
+      # the extracted project before any build script is executed.
+      # ------------------------------------------------------------
+      - name: Restore project script permissions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "============================================================"
+          echo "Restoring project script executable permissions"
+          echo "============================================================"
+
+          if [[ ! -d tools ]]; then
+            echo "ERROR: tools directory was not found." >&2
+            exit 1
+          fi
+
+          echo
+          echo "Shell scripts before chmod:"
+
+          find tools \
+            -type f \
+            -name '*.sh' \
+            -printf '%M %p\n' \
+            | sort || true
+
+          echo
+          echo "Applying executable permissions..."
+
+          while IFS= read -r -d '' script; do
+            chmod +x "$script"
+          done < <(
+            find tools \
+              -type f \
+              -name '*.sh' \
+              -print0
+          )
+
+          echo
+          echo "Shell scripts after chmod:"
+
+          find tools \
+            -type f \
+            -name '*.sh' \
+            -printf '%M %p\n' \
+            | sort
+
+          echo
+          echo "Verifying required build scripts..."
+
+          test -f tools/build-android-arm64.sh
+          test -f tools/package-node-binary.sh
+
+          test -x tools/build-android-arm64.sh
+          test -x tools/package-node-binary.sh
+
+          echo
+          echo "Required build scripts are executable."
+
+      # ------------------------------------------------------------
       # 3. VERIFY PROJECT STRUCTURE
       # ------------------------------------------------------------
       - name: Verify project structure
@@ -181,8 +246,13 @@ jobs:
           test -f android-app/app/src/main/java/com/ycash/androidnode/NodeService.java
 
           test -f tools/build-android-arm64.sh
+          test -f tools/package-node-binary.sh
+
+          test -x tools/build-android-arm64.sh
+          test -x tools/package-node-binary.sh
 
           echo "Project structure verified."
+          echo "Build scripts are executable."
 
       # ------------------------------------------------------------
       # 4. JAVA
@@ -406,12 +476,6 @@ jobs:
             exit 1
           fi
 
-          # --------------------------------------------------------
-          # Use the API-level Android Clang supplied by the NDK.
-          #
-          # NDK 27.2 does not require an unversioned
-          # aarch64-linux-android-clang executable.
-          # --------------------------------------------------------
           CLANG="${TOOLCHAIN}/aarch64-linux-android${ANDROID_API}-clang"
           AR="${TOOLCHAIN}/llvm-ar"
           RANLIB="${TOOLCHAIN}/llvm-ranlib"
@@ -458,52 +522,31 @@ jobs:
           echo "  $RANLIB"
           echo "  $STRIP"
 
-          # --------------------------------------------------------
-          # Create private wrapper directory.
-          # --------------------------------------------------------
           TOOL_WRAPPER_DIR="$RUNNER_TEMP/android-aarch64-tools"
 
           rm -rf "$TOOL_WRAPPER_DIR"
           mkdir -p "$TOOL_WRAPPER_DIR"
 
-          # --------------------------------------------------------
-          # Target-prefixed archive tool.
-          # --------------------------------------------------------
           cat > "$TOOL_WRAPPER_DIR/aarch64-linux-android-ar" <<EOF
           #!/usr/bin/env bash
           exec "$AR" "\$@"
           EOF
 
-          # --------------------------------------------------------
-          # Target-prefixed ranlib tool.
-          # --------------------------------------------------------
           cat > "$TOOL_WRAPPER_DIR/aarch64-linux-android-ranlib" <<EOF
           #!/usr/bin/env bash
           exec "$RANLIB" "\$@"
           EOF
 
-          # --------------------------------------------------------
-          # Target-prefixed strip tool.
-          # --------------------------------------------------------
           cat > "$TOOL_WRAPPER_DIR/aarch64-linux-android-strip" <<EOF
           #!/usr/bin/env bash
           exec "$STRIP" "\$@"
           EOF
 
-          # --------------------------------------------------------
-          # Unversioned target-prefixed Clang wrapper.
-          #
-          # This is our wrapper, not an NDK executable.
-          # It deliberately invokes the API-level Clang above.
-          # --------------------------------------------------------
           cat > "$TOOL_WRAPPER_DIR/aarch64-linux-android-clang" <<EOF
           #!/usr/bin/env bash
           exec "$CLANG" "\$@"
           EOF
 
-          # --------------------------------------------------------
-          # Explicit API-level Clang wrapper.
-          # --------------------------------------------------------
           cat > "$TOOL_WRAPPER_DIR/aarch64-linux-android${ANDROID_API}-clang" <<EOF
           #!/usr/bin/env bash
           exec "$CLANG" "\$@"
@@ -523,20 +566,11 @@ jobs:
 
           ls -la "$TOOL_WRAPPER_DIR"
 
-          # --------------------------------------------------------
-          # Make wrappers available immediately in this step.
-          # --------------------------------------------------------
           export PATH="$TOOL_WRAPPER_DIR:$TOOLCHAIN:$PATH"
 
-          # --------------------------------------------------------
-          # Persist PATH for subsequent GitHub Actions steps.
-          # --------------------------------------------------------
           echo "$TOOL_WRAPPER_DIR" >> "$GITHUB_PATH"
           echo "$TOOLCHAIN" >> "$GITHUB_PATH"
 
-          # --------------------------------------------------------
-          # Persist Android toolchain environment.
-          # --------------------------------------------------------
           {
             echo "ANDROID_NDK_HOME=$NDK_ROOT"
             echo "NDK_ROOT=$NDK_ROOT"
@@ -939,8 +973,51 @@ jobs:
           echo "ANDROID_ABI=${ANDROID_ABI}"
 
           echo
-          echo "Native build script:"
+          echo "============================================================"
+          echo "Checking native build scripts"
+          echo "============================================================"
+
+          test -f tools/build-android-arm64.sh
+          test -f tools/package-node-binary.sh
+
+          echo
+          echo "Build script before chmod:"
           ls -lh tools/build-android-arm64.sh
+
+          echo
+          echo "Package script before chmod:"
+          ls -lh tools/package-node-binary.sh
+
+          echo
+          echo "============================================================"
+          echo "Restoring executable permissions"
+          echo "============================================================"
+
+          # The project is extracted from a ZIP, so executable bits
+          # may not survive ZIP extraction.
+          chmod +x \
+            tools/build-android-arm64.sh \
+            tools/package-node-binary.sh
+
+          echo
+          echo "Native build scripts after chmod:"
+          ls -l \
+            tools/build-android-arm64.sh \
+            tools/package-node-binary.sh
+
+          echo
+          echo "Verifying executable permissions..."
+
+          test -x tools/build-android-arm64.sh
+          test -x tools/package-node-binary.sh
+
+          echo
+          echo "Executable permissions verified."
+
+          echo
+          echo "============================================================"
+          echo "Starting Android ARM64 native build"
+          echo "============================================================"
 
           bash -x tools/build-android-arm64.sh \
             2>&1 | tee android-arm64-build.log
