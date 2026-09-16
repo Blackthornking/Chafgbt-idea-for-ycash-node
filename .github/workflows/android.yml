@@ -817,54 +817,161 @@ jobs:
           echo
           echo "Android ARM64 toolchain configuration completed."
 
+            # ------------------------------------------------------------
+      # 12. VERIFY PARALLEL 4-WORKER PIPELINE CONFIGURATION
       # ------------------------------------------------------------
-      # 12. VERIFY NDK USED BY BUILD SCRIPT
-      # ------------------------------------------------------------
-      - name: Verify Android NDK selected by build
+      - name: Verify parallel 4-worker pipeline configuration
         shell: bash
         run: |
           set -euo pipefail
 
           echo "============================================================"
-          echo "Verifying Android NDK selection"
+          echo "Verifying parallel 4-worker pipeline configuration"
+          echo "============================================================"
+
+          PIPELINE_CONFIG="config/pipeline.toml"
+          ADAPTIVE_SOURCE="crates/state/src/pipeline/adaptive.rs"
+          PIPELINE_SOURCE="crates/state/src/pipeline/mod.rs"
+
+          test -f "$PIPELINE_CONFIG"
+          test -f "$ADAPTIVE_SOURCE"
+          test -f "$PIPELINE_SOURCE"
+
+          echo
+          echo "Pipeline configuration:"
+          cat "$PIPELINE_CONFIG"
+
+          echo
+          echo "============================================================"
+          echo "Checking worker configuration"
+          echo "============================================================"
+
+          WORKERS="$(
+            sed -nE \
+              's/^[[:space:]]*max_validation_workers[[:space:]]*=[[:space:]]*([0-9]+)[[:space:]]*$/\1/p' \
+              "$PIPELINE_CONFIG"
+          )"
+
+          INFLIGHT="$(
+            sed -nE \
+              's/^[[:space:]]*max_inflight_ranges[[:space:]]*=[[:space:]]*([0-9]+)[[:space:]]*$/\1/p' \
+              "$PIPELINE_CONFIG"
+          )"
+
+          echo "Validation workers: $WORKERS"
+          echo "In-flight ranges:   $INFLIGHT"
+
+          [[ "$WORKERS" == "4" ]] || {
+            echo "ERROR: Expected exactly 4 validation workers, got '$WORKERS'." >&2
+            exit 1
+          }
+
+          [[ "$INFLIGHT" == "4" ]] || {
+            echo "ERROR: Expected exactly 4 in-flight ranges, got '$INFLIGHT'." >&2
+            exit 1
+          }
+
+          echo "4 validation workers verified."
+          echo "4 in-flight ranges verified."
+
+          echo
+          echo "============================================================"
+          echo "Checking range length"
+          echo "============================================================"
+
+          grep -Eq \
+            'const MAX_RANGE_LEN:[[:space:]]*u64[[:space:]]*=[[:space:]]*16[[:space:]]*;' \
+            "$PIPELINE_SOURCE"
+
+          echo "MAX_RANGE_LEN = 16 verified."
+
+          echo
+          echo "============================================================"
+          echo "Checking adaptive window"
+          echo "============================================================"
+
+          grep -Eq 'min_window:[[:space:]]*16' "$ADAPTIVE_SOURCE"
+          grep -Eq 'initial_window:[[:space:]]*16' "$ADAPTIVE_SOURCE"
+          grep -Eq 'max_window:[[:space:]]*16' "$ADAPTIVE_SOURCE"
+
+          echo "Adaptive window limits verified at 16."
+
+          echo
+          echo "============================================================"
+          echo "Checking ordered commit configuration"
+          echo "============================================================"
+
+          grep -Eq \
+            '^[[:space:]]*ordered_state_commit[[:space:]]*=[[:space:]]*true[[:space:]]*$' \
+            "$PIPELINE_CONFIG"
+
+          grep -Eq \
+            '^[[:space:]]*bounded_commit_buffer[[:space:]]*=[[:space:]]*true[[:space:]]*$' \
+            "$PIPELINE_CONFIG"
+
+          echo "Ordered state commit enabled."
+          echo "Bounded commit buffer enabled."
+
+          echo
+          echo "============================================================"
+          echo "Checking pipeline source for ordered commit logic"
+          echo "============================================================"
+
+          if grep -RniE \
+            'ordered.*commit|commit.*ordered|next_expected|next.*height' \
+            crates/state/src/pipeline \
+            >/tmp/ordered-commit-check.txt 2>/dev/null; then
+
+            cat /tmp/ordered-commit-check.txt
+            echo
+            echo "Ordered commit implementation detected."
+          else
+            echo "ERROR: Could not detect ordered commit implementation." >&2
+            exit 1
+          fi
+
+          echo
+          echo "============================================================"
+          echo "Checking for stale sequential assertions"
+          echo "============================================================"
+
+          if grep -Eq \
+            'max_validation_workers[[:space:]]*=[[:space:]]*1' \
+            "$PIPELINE_CONFIG"; then
+            echo "ERROR: stale single-worker setting found." >&2
+            exit 1
+          fi
+
+          if grep -Eq \
+            'max_inflight_ranges[[:space:]]*=[[:space:]]*1' \
+            "$PIPELINE_CONFIG"; then
+            echo "ERROR: stale single-range setting found." >&2
+            exit 1
+          fi
+
+          echo "No stale single-worker configuration found."
+
+          echo
+          echo "============================================================"
+          echo "PARALLEL PIPELINE CONFIGURATION VERIFIED"
           echo "============================================================"
 
           echo
-          echo "ANDROID_SDK_ROOT:"
-          echo "${ANDROID_SDK_ROOT}"
-
+          echo "Batch size:             16 blocks"
+          echo "Maximum window:         16 blocks"
+          echo "In-flight ranges:       4"
+          echo "Validation workers:     4"
+          echo "Ordered state commit:  ENABLED"
+          echo "Bounded commit buffer:  ENABLED"
           echo
-          echo "ANDROID_NDK:"
-          echo "${ANDROID_NDK}"
-
-          echo
-          echo "ANDROID_NDK_HOME:"
-          echo "${ANDROID_NDK_HOME:-<not set>}"
-
-          echo
-          echo "ANDROID_NDK_ROOT:"
-          echo "${ANDROID_NDK_ROOT:-<not set>}"
-
-          echo
-          echo "Requested NDK directory:"
-          ls -ld "${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK}"
-
-          echo
-          echo "Installed NDKs:"
-          find "${ANDROID_SDK_ROOT}/ndk" \
-            -mindepth 1 \
-            -maxdepth 1 \
-            -type d \
-            -printf '%f\n' \
-            | sort
-
-          echo
-          echo "Build script NDK references:"
-
-          grep -nEi \
-            'ANDROID_NDK|NDK_ROOT|ANDROID_NDK_HOME|ANDROID_NDK_ROOT|ndk/' \
-            tools/build-android-arm64.sh \
-            || true
+          echo "Expected execution:"
+          echo "  Fetch multiple ranges"
+          echo "        ↓"
+          echo "  Validate concurrently with 4 workers"
+          echo "        ↓"
+          echo "  Buffer completed ranges"
+          echo "        ↓"
+          echo "  Commit strictly by height"
 
       # ------------------------------------------------------------
       # 13. SOURCE / NETWORKING CHECKS
