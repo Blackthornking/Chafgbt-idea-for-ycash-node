@@ -114,7 +114,11 @@ jobs:
             echo "  android-app/"
             echo
             echo "Extracted files:"
-            find "$TMP_DIR" -maxdepth 5 -type f | sort | head -300
+            find "$TMP_DIR" \
+              -maxdepth 5 \
+              -type f \
+              | sort \
+              | sed -n '1,300p'
             exit 1
           fi
 
@@ -122,20 +126,9 @@ jobs:
           echo "Project root found:"
           echo "$PROJECT_ROOT"
 
-          if [[ ! -f "$PROJECT_ROOT/crates/ycash-android-node/Cargo.toml" ]]; then
-            echo "ERROR: ycash-android-node/Cargo.toml is missing." >&2
-            exit 1
-          fi
-
-          if [[ ! -f "$PROJECT_ROOT/crates/ycash-android-node/src/main.rs" ]]; then
-            echo "ERROR: ycash-android-node/src/main.rs is missing." >&2
-            exit 1
-          fi
-
-          if [[ ! -f "$PROJECT_ROOT/crates/ycash-android-node/src/runtime.rs" ]]; then
-            echo "ERROR: ycash-android-node/src/runtime.rs is missing." >&2
-            exit 1
-          fi
+          test -f "$PROJECT_ROOT/crates/ycash-android-node/Cargo.toml"
+          test -f "$PROJECT_ROOT/crates/ycash-android-node/src/main.rs"
+          test -f "$PROJECT_ROOT/crates/ycash-android-node/src/runtime.rs"
 
           echo
           echo "Copying extracted project into GitHub workspace..."
@@ -157,7 +150,10 @@ jobs:
 
           echo
           echo "Android node crate:"
-          find crates/ycash-android-node -maxdepth 3 -type f | sort
+          find crates/ycash-android-node \
+            -maxdepth 3 \
+            -type f \
+            | sort
 
           echo
           echo "Project extraction completed successfully."
@@ -184,6 +180,8 @@ jobs:
           test -f android-app/app/src/main/java/com/ycash/androidnode/MainActivity.java
           test -f android-app/app/src/main/java/com/ycash/androidnode/NodeService.java
 
+          test -f tools/build-android-arm64.sh
+
           echo "Project structure verified."
 
       # ------------------------------------------------------------
@@ -198,10 +196,8 @@ jobs:
       # ------------------------------------------------------------
       # 5. ANDROID SDK / NDK
       #
-      # packages: ''
-      #
-      # Prevents setup-android from attempting to install the
-      # obsolete "tools" package.
+      # Empty packages prevents setup-android from attempting to
+      # install the obsolete "tools" package.
       # ------------------------------------------------------------
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
@@ -213,6 +209,11 @@ jobs:
         run: |
           set -euo pipefail
 
+          echo "============================================================"
+          echo "Installing Android SDK and NDK"
+          echo "============================================================"
+
+          echo
           echo "Accepting Android SDK licenses..."
 
           yes | sdkmanager --licenses >/dev/null || true
@@ -225,6 +226,8 @@ jobs:
             "platforms;android-${ANDROID_API}" \
             "build-tools;35.0.0" \
             "ndk;${ANDROID_NDK}"
+
+          NDK_ROOT="${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK}"
 
           echo
           echo "Android SDK:"
@@ -240,22 +243,14 @@ jobs:
             -printf '%f\n' \
             | sort
 
-          NDK_ROOT="${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK}"
-
-          if [[ ! -d "$NDK_ROOT" ]]; then
-            echo "ERROR: Requested NDK was not installed:"
-            echo "$NDK_ROOT"
-            exit 1
-          fi
+          echo
+          echo "Requested NDK:"
+          echo "$NDK_ROOT"
 
           test -d "${ANDROID_SDK_ROOT}"
           test -d "${ANDROID_SDK_ROOT}/platforms/android-${ANDROID_API}"
           test -d "${ANDROID_SDK_ROOT}/build-tools/35.0.0"
           test -d "$NDK_ROOT"
-
-          echo
-          echo "Requested NDK verified:"
-          echo "$NDK_ROOT"
 
           echo
           echo "NDK version information:"
@@ -376,20 +371,18 @@ jobs:
       # ------------------------------------------------------------
       # 11. ANDROID ARM64 TOOLCHAIN CONFIGURATION
       #
-      # IMPORTANT:
+      # Modern Android NDKs provide LLVM tools such as:
       #
-      # cc-rs can search for target-prefixed tools such as:
+      #   llvm-ar
+      #   llvm-ranlib
+      #   llvm-strip
+      #
+      # cc-rs may search for target-prefixed tools such as:
       #
       #   aarch64-linux-android-ar
       #   aarch64-linux-android-ranlib
       #
-      # Modern Android NDKs provide:
-      #
-      #   llvm-ar
-      #   llvm-ranlib
-      #
-      # Create private wrappers so cc-rs can resolve the expected
-      # target-prefixed names.
+      # Private executable wrappers are created for those names.
       # ------------------------------------------------------------
       - name: Configure Android ARM64 linker
         shell: bash
@@ -402,13 +395,11 @@ jobs:
 
           NDK_ROOT="${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK}"
 
-          if [[ ! -d "$NDK_ROOT" ]]; then
-            echo "ERROR: Requested NDK does not exist:"
-            echo "$NDK_ROOT"
-            exit 1
-          fi
+          test -d "$NDK_ROOT"
 
           TOOLCHAIN="${NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+          test -d "$TOOLCHAIN"
 
           CLANG="${TOOLCHAIN}/aarch64-linux-android${ANDROID_API}-clang"
           CLANG_UNVERSIONED="${TOOLCHAIN}/aarch64-linux-android-clang"
@@ -416,55 +407,68 @@ jobs:
           RANLIB="${TOOLCHAIN}/llvm-ranlib"
           STRIP="${TOOLCHAIN}/llvm-strip"
 
+          echo
+          echo "Checking Android LLVM tools..."
+
           test -x "$CLANG"
+          test -x "$CLANG_UNVERSIONED"
           test -x "$AR"
           test -x "$RANLIB"
           test -x "$STRIP"
 
-          echo
-          echo "NDK root:"
-          echo "$NDK_ROOT"
-
-          echo
-          echo "LLVM toolchain:"
-          echo "$TOOLCHAIN"
-
-          echo
-          echo "Clang:"
-          echo "$CLANG"
-
-          echo
-          echo "AR:"
-          echo "$AR"
-
-          echo
-          echo "RANLIB:"
-          echo "$RANLIB"
+          echo "FOUND:"
+          echo "  $CLANG"
+          echo "  $CLANG_UNVERSIONED"
+          echo "  $AR"
+          echo "  $RANLIB"
+          echo "  $STRIP"
 
           # --------------------------------------------------------
-          # Create private target-prefixed tool directory.
+          # Create private wrapper directory.
           # --------------------------------------------------------
           TOOL_WRAPPER_DIR="$RUNNER_TEMP/android-aarch64-tools"
 
           rm -rf "$TOOL_WRAPPER_DIR"
           mkdir -p "$TOOL_WRAPPER_DIR"
 
-          # Clang wrappers.
-          ln -s "$CLANG" \
+          # --------------------------------------------------------
+          # Create executable wrappers instead of symlinks.
+          #
+          # This makes the target-prefixed commands deterministic
+          # and avoids conflicts with existing files.
+          # --------------------------------------------------------
+
+          cat > "$TOOL_WRAPPER_DIR/aarch64-linux-android-ar" <<EOF
+          #!/usr/bin/env bash
+          exec "$AR" "\$@"
+          EOF
+
+          cat > "$TOOL_WRAPPER_DIR/aarch64-linux-android-ranlib" <<EOF
+          #!/usr/bin/env bash
+          exec "$RANLIB" "\$@"
+          EOF
+
+          cat > "$TOOL_WRAPPER_DIR/aarch64-linux-android-strip" <<EOF
+          #!/usr/bin/env bash
+          exec "$STRIP" "\$@"
+          EOF
+
+          cat > "$TOOL_WRAPPER_DIR/aarch64-linux-android-clang" <<EOF
+          #!/usr/bin/env bash
+          exec "$CLANG_UNVERSIONED" "\$@"
+          EOF
+
+          cat > "$TOOL_WRAPPER_DIR/aarch64-linux-android${ANDROID_API}-clang" <<EOF
+          #!/usr/bin/env bash
+          exec "$CLANG" "\$@"
+          EOF
+
+          chmod +x \
+            "$TOOL_WRAPPER_DIR/aarch64-linux-android-ar" \
+            "$TOOL_WRAPPER_DIR/aarch64-linux-android-ranlib" \
+            "$TOOL_WRAPPER_DIR/aarch64-linux-android-strip" \
+            "$TOOL_WRAPPER_DIR/aarch64-linux-android-clang" \
             "$TOOL_WRAPPER_DIR/aarch64-linux-android${ANDROID_API}-clang"
-
-          ln -s "$CLANG_UNVERSIONED" \
-            "$TOOL_WRAPPER_DIR/aarch64-linux-android-clang"
-
-          # Tools expected by cc-rs.
-          ln -s "$AR" \
-            "$TOOL_WRAPPER_DIR/aarch64-linux-android-ar"
-
-          ln -s "$RANLIB" \
-            "$TOOL_WRAPPER_DIR/aarch64-linux-android-ranlib"
-
-          ln -s "$STRIP" \
-            "$TOOL_WRAPPER_DIR/aarch64-linux-android-strip"
 
           echo
           echo "============================================================"
@@ -473,11 +477,20 @@ jobs:
 
           ls -la "$TOOL_WRAPPER_DIR"
 
-          # Put wrappers first in PATH for this and all later steps.
+          # --------------------------------------------------------
+          # Make wrappers available immediately in this step.
+          # --------------------------------------------------------
+          export PATH="$TOOL_WRAPPER_DIR:$TOOLCHAIN:$PATH"
+
+          # --------------------------------------------------------
+          # Persist PATH for every subsequent GitHub Actions step.
+          # --------------------------------------------------------
           echo "$TOOL_WRAPPER_DIR" >> "$GITHUB_PATH"
           echo "$TOOLCHAIN" >> "$GITHUB_PATH"
 
-          # Also export the standard Android toolchain variables.
+          # --------------------------------------------------------
+          # Persist Android toolchain environment.
+          # --------------------------------------------------------
           {
             echo "ANDROID_NDK_HOME=$NDK_ROOT"
             echo "NDK_ROOT=$NDK_ROOT"
@@ -488,7 +501,9 @@ jobs:
           } >> "$GITHUB_ENV"
 
           echo
-          echo "Writing Cargo target configuration..."
+          echo "============================================================"
+          echo "Writing Cargo target configuration"
+          echo "============================================================"
 
           mkdir -p "$HOME/.cargo"
 
@@ -524,6 +539,10 @@ jobs:
           aarch64-linux-android-ranlib --version | sed -n '1,5p'
 
           echo
+          echo "aarch64-linux-android-strip:"
+          aarch64-linux-android-strip --version | sed -n '1,5p'
+
+          echo
           echo "ARM64 Clang:"
           aarch64-linux-android-clang --version | sed -n '1,5p'
 
@@ -532,9 +551,6 @@ jobs:
 
       # ------------------------------------------------------------
       # 12. VERIFY NDK USED BY BUILD SCRIPT
-      #
-      # This catches a build script that silently selects a different
-      # NDK than ANDROID_NDK.
       # ------------------------------------------------------------
       - name: Verify Android NDK selected by build
         shell: bash
@@ -828,6 +844,13 @@ jobs:
           echo
           echo "STRIP:"
           command -v aarch64-linux-android-strip
+
+          echo
+          echo "Resolved tool paths:"
+          readlink -f "$(command -v aarch64-linux-android-clang)"
+          readlink -f "$(command -v aarch64-linux-android-ar)"
+          readlink -f "$(command -v aarch64-linux-android-ranlib)"
+          readlink -f "$(command -v aarch64-linux-android-strip)"
 
           echo
           echo "Rust target:"
