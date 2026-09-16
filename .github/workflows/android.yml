@@ -41,7 +41,7 @@ jobs:
       # ------------------------------------------------------------
       # 2. PREPARE PROJECT ROOT
       #
-      # Supports both:
+      # Supports:
       #
       #   Layout A:
       #     Cargo.toml
@@ -63,8 +63,6 @@ jobs:
           echo "Preparing Ycash project root"
           echo "============================================================"
 
-          # If the repository already contains the extracted project,
-          # use it directly.
           if [[ -f Cargo.toml && -d crates && -d android-app ]]; then
             echo "Project already exists at repository root."
             exit 0
@@ -137,7 +135,6 @@ jobs:
           echo "Project root found:"
           echo "$PROJECT_ROOT"
 
-          # Verify the Android node crate before copying.
           if [[ ! -f "$PROJECT_ROOT/crates/ycash-android-node/Cargo.toml" ]]; then
             echo "ERROR: ycash-android-node/Cargo.toml is missing." >&2
             exit 1
@@ -156,8 +153,6 @@ jobs:
           echo
           echo "Copying extracted project into GitHub workspace..."
 
-          # Do not copy Git metadata.
-          # Do not overwrite the active GitHub workflow.
           rsync -a \
             --exclude='.git/' \
             --exclude='.github/workflows/' \
@@ -216,12 +211,10 @@ jobs:
       # ------------------------------------------------------------
       # 5. ANDROID SDK / NDK
       #
-      # IMPORTANT:
       # packages: ''
       #
-      # setup-android otherwise attempts to install the legacy
-      # "tools" package, which causes sdkmanager to fail.
-      # Required SDK packages are installed explicitly below.
+      # Prevents setup-android from attempting to install the
+      # obsolete "tools" package.
       # ------------------------------------------------------------
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
@@ -272,13 +265,6 @@ jobs:
 
       # ------------------------------------------------------------
       # 7. VERIFY RUST TARGET
-      #
-      # Do NOT use:
-      #
-      #   rustup target list --installed | grep -q ...
-      #
-      # with pipefail because grep -q can close the pipe early and
-      # cause rustup to receive SIGPIPE.
       # ------------------------------------------------------------
       - name: Verify Rust workspace and target
         shell: bash
@@ -304,7 +290,46 @@ jobs:
           test -f Cargo.toml
 
       # ------------------------------------------------------------
-      # 8. RUST REGRESSION TESTS
+      # 8. VERIFY RUST TEST FIXTURES
+      #
+      # These are required by ycash-crypto's MMR tests.
+      # ------------------------------------------------------------
+      - name: Verify Rust test fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Checking required Rust test fixtures..."
+
+          REQUIRED_FIXTURES=(
+            "crates/ycash-crypto/src/tests/res/tree16.dat"
+            "crates/ycash-crypto/src/tests/res/tree1023.dat"
+          )
+
+          missing=0
+
+          for fixture in "${REQUIRED_FIXTURES[@]}"; do
+            if [[ -f "$fixture" ]]; then
+              echo "FOUND: $fixture"
+              ls -lh "$fixture"
+            else
+              echo "MISSING: $fixture"
+              missing=1
+            fi
+          done
+
+          if [[ "$missing" -ne 0 ]]; then
+            echo
+            echo "ERROR: Required Rust test fixtures are missing."
+            echo "The Ycash project ZIP must contain the original .dat files."
+            exit 1
+          fi
+
+          echo
+          echo "All Rust test fixtures verified."
+
+      # ------------------------------------------------------------
+      # 9. RUST REGRESSION TESTS
       # ------------------------------------------------------------
       - name: Run Rust regression tests
         shell: bash
@@ -314,7 +339,7 @@ jobs:
           cargo test --workspace --all-targets
 
       # ------------------------------------------------------------
-      # 9. SQLITE SCHEMA ORDERING CHECK
+      # 10. SQLITE SCHEMA ORDERING CHECK
       # ------------------------------------------------------------
       - name: Verify SQLite schema ordering
         shell: bash
@@ -339,7 +364,7 @@ jobs:
           fi
 
       # ------------------------------------------------------------
-      # 10. ANDROID LINKER CONFIGURATION
+      # 11. ANDROID LINKER CONFIGURATION
       # ------------------------------------------------------------
       - name: Configure Android ARM64 linker
         shell: bash
@@ -372,7 +397,7 @@ jobs:
           cat "$HOME/.cargo/config.toml"
 
       # ------------------------------------------------------------
-      # 11. SOURCE / NETWORKING CHECKS
+      # 12. SOURCE / NETWORKING CHECKS
       # ------------------------------------------------------------
       - name: Verify node networking and protocol sources
         shell: bash
@@ -457,7 +482,7 @@ jobs:
           fi
 
       # ------------------------------------------------------------
-      # 12. ANDROID RUNTIME SOURCE CHECKS
+      # 13. ANDROID RUNTIME SOURCE CHECKS
       # ------------------------------------------------------------
       - name: Verify Android runtime integration
         shell: bash
@@ -529,14 +554,22 @@ jobs:
             android-app
 
           echo
-          echo "Checking localhost cleartext traffic..."
+          echo "Checking Android cleartext traffic configuration..."
 
-          grep -Rni \
-            'cleartextTrafficPermitted' \
-            android-app
+          MANIFEST="android-app/app/src/main/AndroidManifest.xml"
+
+          if grep -Fni \
+            'android:usesCleartextTraffic="true"' \
+            "$MANIFEST"; then
+
+            echo "Android cleartext traffic is explicitly enabled."
+          else
+            echo "ERROR: android:usesCleartextTraffic=\"true\" was not found in AndroidManifest.xml." >&2
+            exit 1
+          fi
 
       # ------------------------------------------------------------
-      # 13. CRASH-SAFE DIAGNOSTICS CHECKS
+      # 14. CRASH-SAFE DIAGNOSTICS CHECKS
       # ------------------------------------------------------------
       - name: Verify crash-safe diagnostics
         shell: bash
@@ -593,7 +626,7 @@ jobs:
             "$APP_SRC"
 
       # ------------------------------------------------------------
-      # 14. CLEAN NATIVE PACKAGE
+      # 15. CLEAN NATIVE PACKAGE
       # ------------------------------------------------------------
       - name: Clean native package directory
         shell: bash
@@ -608,7 +641,7 @@ jobs:
           echo "Native package directory prepared."
 
       # ------------------------------------------------------------
-      # 15. CARGO CACHE
+      # 16. CARGO CACHE
       # ------------------------------------------------------------
       - name: Cache Rust dependencies
         uses: actions/cache@v4
@@ -622,7 +655,7 @@ jobs:
             ${{ runner.os }}-cargo-
 
       # ------------------------------------------------------------
-      # 16. BUILD ANDROID ARM64 NATIVE NODE
+      # 17. BUILD ANDROID ARM64 NATIVE NODE
       # ------------------------------------------------------------
       - name: Build Android ARM64 native node
         shell: bash
@@ -646,7 +679,7 @@ jobs:
           exit "$status"
 
       # ------------------------------------------------------------
-      # 17. ALWAYS UPLOAD NATIVE BUILD LOG
+      # 18. ALWAYS UPLOAD NATIVE BUILD LOG
       # ------------------------------------------------------------
       - name: Upload Android ARM64 build diagnostics
         if: always()
@@ -657,7 +690,7 @@ jobs:
           if-no-files-found: warn
 
       # ------------------------------------------------------------
-      # 18. VERIFY BUILT ELF
+      # 19. VERIFY BUILT ELF
       # ------------------------------------------------------------
       - name: Verify Android ARM64 ELF
         shell: bash
@@ -695,8 +728,10 @@ jobs:
             exit 1
           fi
 
+          echo "AArch64 ELF verified."
+
       # ------------------------------------------------------------
-      # 19. PACKAGE NATIVE LIBRARY INTO JNI
+      # 20. PACKAGE NATIVE LIBRARY INTO JNI
       # ------------------------------------------------------------
       - name: Package native ARM64 library
         shell: bash
@@ -734,7 +769,7 @@ jobs:
           echo "Native package hash verified."
 
       # ------------------------------------------------------------
-      # 20. VERIFY ANDROID PACKAGE
+      # 21. VERIFY ANDROID PACKAGE
       # ------------------------------------------------------------
       - name: Verify Android native package
         shell: bash
@@ -754,7 +789,7 @@ jobs:
           fi
 
       # ------------------------------------------------------------
-      # 21. SET UP GRADLE
+      # 22. SET UP GRADLE
       # ------------------------------------------------------------
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
@@ -762,7 +797,7 @@ jobs:
           gradle-version: "8.10.2"
 
       # ------------------------------------------------------------
-      # 22. BUILD DEBUG APK
+      # 23. BUILD DEBUG APK
       # ------------------------------------------------------------
       - name: Build Android debug APK
         working-directory: android-app
@@ -778,13 +813,7 @@ jobs:
             assembleDebug
 
       # ------------------------------------------------------------
-      # 23. VERIFY DEBUG APK
-      #
-      # Capture unzip output first instead of:
-      #
-      #   unzip -l APK | grep -q ...
-      #
-      # because grep -q can trigger SIGPIPE under pipefail.
+      # 24. VERIFY DEBUG APK
       # ------------------------------------------------------------
       - name: Verify debug APK
         shell: bash
@@ -816,7 +845,7 @@ jobs:
           echo "APK verification successful."
 
       # ------------------------------------------------------------
-      # 24. CREATE TEMPORARY CI KEYSTORE
+      # 25. CREATE TEMPORARY CI KEYSTORE
       # ------------------------------------------------------------
       - name: Create temporary CI signing keystore
         shell: bash
@@ -842,7 +871,7 @@ jobs:
           echo "Temporary CI keystore created."
 
       # ------------------------------------------------------------
-      # 25. LOCATE ANDROID BUILD TOOLS
+      # 26. LOCATE ANDROID BUILD TOOLS
       # ------------------------------------------------------------
       - name: Locate Android signing tools
         shell: bash
@@ -862,7 +891,7 @@ jobs:
           "${BUILD_TOOLS}/apksigner" version
 
       # ------------------------------------------------------------
-      # 26. ZIPALIGN APK
+      # 27. ZIPALIGN APK
       # ------------------------------------------------------------
       - name: Zipalign debug APK
         shell: bash
@@ -885,10 +914,14 @@ jobs:
 
           test -f "$ALIGNED_APK"
 
-          "${BUILD_TOOLS}/zipalign" -c -v 4 "$ALIGNED_APK"
+          "${BUILD_TOOLS}/zipalign" \
+            -c \
+            -v \
+            4 \
+            "$ALIGNED_APK"
 
       # ------------------------------------------------------------
-      # 27. SIGN APK
+      # 28. SIGN APK
       # ------------------------------------------------------------
       - name: Sign Android APK
         shell: bash
@@ -916,7 +949,7 @@ jobs:
           ls -lh "$SIGNED_APK"
 
       # ------------------------------------------------------------
-      # 28. VERIFY SIGNED APK
+      # 29. VERIFY SIGNED APK
       # ------------------------------------------------------------
       - name: Verify signed APK
         shell: bash
@@ -929,7 +962,10 @@ jobs:
 
           test -f "$SIGNED_APK"
 
-          "${BUILD_TOOLS}/apksigner" verify --verbose "$SIGNED_APK"
+          "${BUILD_TOOLS}/apksigner" \
+            verify \
+            --verbose \
+            "$SIGNED_APK"
 
           echo
           echo "Signed APK signature verified."
@@ -949,7 +985,7 @@ jobs:
           fi
 
       # ------------------------------------------------------------
-      # 29. FINAL SIGNED APK REGRESSION CHECK
+      # 30. FINAL SIGNED APK REGRESSION CHECK
       # ------------------------------------------------------------
       - name: Final signed APK regression verification
         shell: bash
@@ -981,7 +1017,9 @@ jobs:
 
           BUILD_TOOLS="${ANDROID_SDK_ROOT}/build-tools/35.0.0"
 
-          "${BUILD_TOOLS}/apksigner" verify "$SIGNED_APK"
+          "${BUILD_TOOLS}/apksigner" \
+            verify \
+            "$SIGNED_APK"
 
           echo
           echo "============================================================"
@@ -997,7 +1035,7 @@ jobs:
           sha256sum "$SIGNED_APK"
 
       # ------------------------------------------------------------
-      # 30. UPLOAD FINAL APK
+      # 31. UPLOAD FINAL APK
       # ------------------------------------------------------------
       - name: Upload signed APK
         if: success()
@@ -1008,7 +1046,7 @@ jobs:
           if-no-files-found: error
 
       # ------------------------------------------------------------
-      # 31. UPLOAD RAW NATIVE NODE
+      # 32. UPLOAD RAW NATIVE NODE
       # ------------------------------------------------------------
       - name: Upload raw Android ARM64 native node
         if: success()
@@ -1019,7 +1057,7 @@ jobs:
           if-no-files-found: error
 
       # ------------------------------------------------------------
-      # 32. UPLOAD DIAGNOSTIC SOURCE FILES
+      # 33. UPLOAD DIAGNOSTIC SOURCE FILES
       # ------------------------------------------------------------
       - name: Upload diagnostic source files
         if: always()
@@ -1035,7 +1073,7 @@ jobs:
           if-no-files-found: warn
 
       # ------------------------------------------------------------
-      # 33. CLEAN TEMPORARY SIGNING MATERIAL
+      # 34. CLEAN TEMPORARY SIGNING MATERIAL
       # ------------------------------------------------------------
       - name: Clean temporary signing material
         if: always()
