@@ -40,19 +40,6 @@ jobs:
 
       # ------------------------------------------------------------
       # 2. PREPARE PROJECT ROOT
-      #
-      # Supports:
-      #
-      #   Layout A:
-      #     Cargo.toml
-      #     crates/
-      #     android-app/
-      #
-      #   Layout B:
-      #     YORTAL-NODE-....zip
-      #
-      # If the repository contains the project as a ZIP, the ZIP is
-      # automatically extracted and copied into the workspace.
       # ------------------------------------------------------------
       - name: Prepare project root from ZIP
         shell: bash
@@ -244,13 +231,38 @@ jobs:
           echo "${ANDROID_SDK_ROOT}"
 
           echo
-          echo "Android NDK:"
-          echo "${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK}"
+          echo "Installed Android NDK directories:"
+
+          find "${ANDROID_SDK_ROOT}/ndk" \
+            -mindepth 1 \
+            -maxdepth 1 \
+            -type d \
+            -printf '%f\n' \
+            | sort
+
+          NDK_ROOT="${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK}"
+
+          if [[ ! -d "$NDK_ROOT" ]]; then
+            echo "ERROR: Requested NDK was not installed:"
+            echo "$NDK_ROOT"
+            exit 1
+          fi
 
           test -d "${ANDROID_SDK_ROOT}"
           test -d "${ANDROID_SDK_ROOT}/platforms/android-${ANDROID_API}"
           test -d "${ANDROID_SDK_ROOT}/build-tools/35.0.0"
-          test -d "${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK}"
+          test -d "$NDK_ROOT"
+
+          echo
+          echo "Requested NDK verified:"
+          echo "$NDK_ROOT"
+
+          echo
+          echo "NDK version information:"
+
+          if [[ -f "$NDK_ROOT/source.properties" ]]; then
+            cat "$NDK_ROOT/source.properties"
+          fi
 
           echo
           echo "Android SDK and NDK verified."
@@ -291,8 +303,6 @@ jobs:
 
       # ------------------------------------------------------------
       # 8. VERIFY RUST TEST FIXTURES
-      #
-      # These are required by ycash-crypto's MMR tests.
       # ------------------------------------------------------------
       - name: Verify Rust test fixtures
         shell: bash
@@ -364,23 +374,121 @@ jobs:
           fi
 
       # ------------------------------------------------------------
-      # 11. ANDROID LINKER CONFIGURATION
+      # 11. ANDROID ARM64 TOOLCHAIN CONFIGURATION
+      #
+      # IMPORTANT:
+      #
+      # cc-rs can search for target-prefixed tools such as:
+      #
+      #   aarch64-linux-android-ar
+      #   aarch64-linux-android-ranlib
+      #
+      # Modern Android NDKs provide:
+      #
+      #   llvm-ar
+      #   llvm-ranlib
+      #
+      # Create private wrappers so cc-rs can resolve the expected
+      # target-prefixed names.
       # ------------------------------------------------------------
       - name: Configure Android ARM64 linker
         shell: bash
         run: |
           set -euo pipefail
 
+          echo "============================================================"
+          echo "Configuring Android ARM64 toolchain"
+          echo "============================================================"
+
           NDK_ROOT="${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK}"
+
+          if [[ ! -d "$NDK_ROOT" ]]; then
+            echo "ERROR: Requested NDK does not exist:"
+            echo "$NDK_ROOT"
+            exit 1
+          fi
+
           TOOLCHAIN="${NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
-          CLANG="${TOOLCHAIN}/aarch64-linux-android35-clang"
+          CLANG="${TOOLCHAIN}/aarch64-linux-android${ANDROID_API}-clang"
+          CLANG_UNVERSIONED="${TOOLCHAIN}/aarch64-linux-android-clang"
           AR="${TOOLCHAIN}/llvm-ar"
           RANLIB="${TOOLCHAIN}/llvm-ranlib"
+          STRIP="${TOOLCHAIN}/llvm-strip"
 
           test -x "$CLANG"
           test -x "$AR"
           test -x "$RANLIB"
+          test -x "$STRIP"
+
+          echo
+          echo "NDK root:"
+          echo "$NDK_ROOT"
+
+          echo
+          echo "LLVM toolchain:"
+          echo "$TOOLCHAIN"
+
+          echo
+          echo "Clang:"
+          echo "$CLANG"
+
+          echo
+          echo "AR:"
+          echo "$AR"
+
+          echo
+          echo "RANLIB:"
+          echo "$RANLIB"
+
+          # --------------------------------------------------------
+          # Create private target-prefixed tool directory.
+          # --------------------------------------------------------
+          TOOL_WRAPPER_DIR="$RUNNER_TEMP/android-aarch64-tools"
+
+          rm -rf "$TOOL_WRAPPER_DIR"
+          mkdir -p "$TOOL_WRAPPER_DIR"
+
+          # Clang wrappers.
+          ln -s "$CLANG" \
+            "$TOOL_WRAPPER_DIR/aarch64-linux-android${ANDROID_API}-clang"
+
+          ln -s "$CLANG_UNVERSIONED" \
+            "$TOOL_WRAPPER_DIR/aarch64-linux-android-clang"
+
+          # Tools expected by cc-rs.
+          ln -s "$AR" \
+            "$TOOL_WRAPPER_DIR/aarch64-linux-android-ar"
+
+          ln -s "$RANLIB" \
+            "$TOOL_WRAPPER_DIR/aarch64-linux-android-ranlib"
+
+          ln -s "$STRIP" \
+            "$TOOL_WRAPPER_DIR/aarch64-linux-android-strip"
+
+          echo
+          echo "============================================================"
+          echo "Android ARM64 wrapper tools"
+          echo "============================================================"
+
+          ls -la "$TOOL_WRAPPER_DIR"
+
+          # Put wrappers first in PATH for this and all later steps.
+          echo "$TOOL_WRAPPER_DIR" >> "$GITHUB_PATH"
+          echo "$TOOLCHAIN" >> "$GITHUB_PATH"
+
+          # Also export the standard Android toolchain variables.
+          {
+            echo "ANDROID_NDK_HOME=$NDK_ROOT"
+            echo "NDK_ROOT=$NDK_ROOT"
+            echo "ANDROID_NDK_ROOT=$NDK_ROOT"
+            echo "AR_aarch64_linux_android=$AR"
+            echo "CC_aarch64_linux_android=$CLANG"
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$CLANG"
+          } >> "$GITHUB_ENV"
+
+          echo
+          echo "Writing Cargo target configuration..."
 
           mkdir -p "$HOME/.cargo"
 
@@ -393,11 +501,89 @@ jobs:
           ]
           EOF
 
-          echo "Android linker configuration:"
+          echo
+          echo "Cargo configuration:"
           cat "$HOME/.cargo/config.toml"
 
+          echo
+          echo "============================================================"
+          echo "Verifying target-prefixed tools"
+          echo "============================================================"
+
+          command -v aarch64-linux-android-ar
+          command -v aarch64-linux-android-ranlib
+          command -v aarch64-linux-android-strip
+          command -v aarch64-linux-android-clang
+
+          echo
+          echo "aarch64-linux-android-ar:"
+          aarch64-linux-android-ar --version | sed -n '1,5p'
+
+          echo
+          echo "aarch64-linux-android-ranlib:"
+          aarch64-linux-android-ranlib --version | sed -n '1,5p'
+
+          echo
+          echo "ARM64 Clang:"
+          aarch64-linux-android-clang --version | sed -n '1,5p'
+
+          echo
+          echo "Android ARM64 toolchain configuration completed."
+
       # ------------------------------------------------------------
-      # 12. SOURCE / NETWORKING CHECKS
+      # 12. VERIFY NDK USED BY BUILD SCRIPT
+      #
+      # This catches a build script that silently selects a different
+      # NDK than ANDROID_NDK.
+      # ------------------------------------------------------------
+      - name: Verify Android NDK selected by build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "============================================================"
+          echo "Verifying Android NDK selection"
+          echo "============================================================"
+
+          echo
+          echo "ANDROID_SDK_ROOT:"
+          echo "${ANDROID_SDK_ROOT}"
+
+          echo
+          echo "ANDROID_NDK:"
+          echo "${ANDROID_NDK}"
+
+          echo
+          echo "ANDROID_NDK_HOME:"
+          echo "${ANDROID_NDK_HOME:-<not set>}"
+
+          echo
+          echo "ANDROID_NDK_ROOT:"
+          echo "${ANDROID_NDK_ROOT:-<not set>}"
+
+          echo
+          echo "Requested NDK directory:"
+          ls -ld "${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK}"
+
+          echo
+          echo "Installed NDKs:"
+          find "${ANDROID_SDK_ROOT}/ndk" \
+            -mindepth 1 \
+            -maxdepth 1 \
+            -type d \
+            -printf '%f\n' \
+            | sort
+
+          echo
+          echo "Build script NDK references:"
+
+          grep -nEi \
+            'ANDROID_NDK|NDK_ROOT|ANDROID_NDK_HOME|ANDROID_NDK_ROOT|ndk/' \
+            tools/build-android-arm64.sh \
+            || true
+
+      # ------------------------------------------------------------
+      # 13. SOURCE / NETWORKING CHECKS
       # ------------------------------------------------------------
       - name: Verify node networking and protocol sources
         shell: bash
@@ -482,7 +668,7 @@ jobs:
           fi
 
       # ------------------------------------------------------------
-      # 13. ANDROID RUNTIME SOURCE CHECKS
+      # 14. ANDROID RUNTIME SOURCE CHECKS
       # ------------------------------------------------------------
       - name: Verify Android runtime integration
         shell: bash
@@ -492,66 +678,39 @@ jobs:
           RUNTIME_DIR="android-app/app/src/main"
 
           echo "Checking nativeLibraryDir..."
-
-          grep -Rni \
-            'nativeLibraryDir' \
-            "$RUNTIME_DIR"
+          grep -Rni 'nativeLibraryDir' "$RUNTIME_DIR"
 
           echo
           echo "Checking libycashandroidnode.so..."
-
-          grep -Rni \
-            'libycashandroidnode.so' \
-            "$RUNTIME_DIR"
+          grep -Rni 'libycashandroidnode.so' "$RUNTIME_DIR"
 
           echo
           echo "Checking ProcessBuilder..."
-
-          grep -Rni \
-            'ProcessBuilder' \
-            "$RUNTIME_DIR"
+          grep -Rni 'ProcessBuilder' "$RUNTIME_DIR"
 
           echo
           echo "Checking node.log..."
-
-          grep -Rni \
-            'node.log' \
-            "$RUNTIME_DIR"
+          grep -Rni 'node.log' "$RUNTIME_DIR"
 
           echo
           echo "Checking redirectErrorStream..."
-
-          grep -Rni \
-            'redirectErrorStream' \
-            "$RUNTIME_DIR"
+          grep -Rni 'redirectErrorStream' "$RUNTIME_DIR"
 
           echo
           echo "Checking node ports..."
-
-          grep -RniE \
-            '8833|8832|8834|9067' \
-            "$RUNTIME_DIR"
+          grep -RniE '8833|8832|8834|9067' "$RUNTIME_DIR"
 
           echo
           echo "Checking arm64-v8a..."
-
-          grep -Rni \
-            'arm64-v8a' \
-            android-app
+          grep -Rni 'arm64-v8a' android-app
 
           echo
           echo "Checking doNotStrip..."
-
-          grep -Rni \
-            'doNotStrip' \
-            android-app
+          grep -Rni 'doNotStrip' android-app
 
           echo
           echo "Checking extractNativeLibs..."
-
-          grep -Rni \
-            'extractNativeLibs' \
-            android-app
+          grep -Rni 'extractNativeLibs' android-app
 
           echo
           echo "Checking Android cleartext traffic configuration..."
@@ -569,7 +728,7 @@ jobs:
           fi
 
       # ------------------------------------------------------------
-      # 14. CRASH-SAFE DIAGNOSTICS CHECKS
+      # 15. CRASH-SAFE DIAGNOSTICS CHECKS
       # ------------------------------------------------------------
       - name: Verify crash-safe diagnostics
         shell: bash
@@ -579,54 +738,38 @@ jobs:
           APP_SRC="android-app/app/src/main"
 
           echo "Checking refreshDeviceStatsSafe..."
-          grep -Rni \
-            'refreshDeviceStatsSafe' \
-            "$APP_SRC"
+          grep -Rni 'refreshDeviceStatsSafe' "$APP_SRC"
 
           echo
           echo "Checking refreshNodeLog..."
-          grep -Rni \
-            'refreshNodeLog' \
-            "$APP_SRC"
+          grep -Rni 'refreshNodeLog' "$APP_SRC"
 
           echo
           echo "Checking refreshAppErrorLog..."
-          grep -Rni \
-            'refreshAppErrorLog' \
-            "$APP_SRC"
+          grep -Rni 'refreshAppErrorLog' "$APP_SRC"
 
           echo
           echo "Checking safeSetText..."
-          grep -Rni \
-            'safeSetText' \
-            "$APP_SRC"
+          grep -Rni 'safeSetText' "$APP_SRC"
 
           echo
           echo "Checking writeAppError..."
-          grep -Rni \
-            'writeAppError' \
-            "$APP_SRC"
+          grep -Rni 'writeAppError' "$APP_SRC"
 
           echo
           echo "Checking app-error.log..."
-          grep -Rni \
-            'app-error.log' \
-            "$APP_SRC"
+          grep -Rni 'app-error.log' "$APP_SRC"
 
           echo
           echo "Checking UNCAUGHT EXCEPTION..."
-          grep -Rni \
-            'UNCAUGHT EXCEPTION' \
-            "$APP_SRC"
+          grep -Rni 'UNCAUGHT EXCEPTION' "$APP_SRC"
 
           echo
           echo "Checking DIAGNOSTICS CLICK..."
-          grep -Rni \
-            'DIAGNOSTICS CLICK' \
-            "$APP_SRC"
+          grep -Rni 'DIAGNOSTICS CLICK' "$APP_SRC"
 
       # ------------------------------------------------------------
-      # 15. CLEAN NATIVE PACKAGE
+      # 16. CLEAN NATIVE PACKAGE
       # ------------------------------------------------------------
       - name: Clean native package directory
         shell: bash
@@ -641,7 +784,7 @@ jobs:
           echo "Native package directory prepared."
 
       # ------------------------------------------------------------
-      # 16. CARGO CACHE
+      # 17. CARGO CACHE
       # ------------------------------------------------------------
       - name: Cache Rust dependencies
         uses: actions/cache@v4
@@ -655,7 +798,54 @@ jobs:
             ${{ runner.os }}-cargo-
 
       # ------------------------------------------------------------
-      # 17. BUILD ANDROID ARM64 NATIVE NODE
+      # 18. FINAL TOOLCHAIN CHECK BEFORE NATIVE BUILD
+      # ------------------------------------------------------------
+      - name: Final Android ARM64 toolchain check
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "============================================================"
+          echo "Final Android ARM64 toolchain check"
+          echo "============================================================"
+
+          echo
+          echo "Target:"
+          echo "${RUST_TARGET}"
+
+          echo
+          echo "CC:"
+          command -v aarch64-linux-android-clang
+
+          echo
+          echo "AR:"
+          command -v aarch64-linux-android-ar
+
+          echo
+          echo "RANLIB:"
+          command -v aarch64-linux-android-ranlib
+
+          echo
+          echo "STRIP:"
+          command -v aarch64-linux-android-strip
+
+          echo
+          echo "Rust target:"
+          rustup target list --installed
+
+          echo
+          echo "Cargo target configuration:"
+          cat "$HOME/.cargo/config.toml"
+
+          echo
+          echo "NDK:"
+          echo "${ANDROID_NDK_HOME}"
+
+          echo
+          echo "Final toolchain check passed."
+
+      # ------------------------------------------------------------
+      # 19. BUILD ANDROID ARM64 NATIVE NODE
       # ------------------------------------------------------------
       - name: Build Android ARM64 native node
         shell: bash
@@ -665,6 +855,18 @@ jobs:
           echo "============================================================"
           echo "Building Android ARM64 native Ycash node"
           echo "============================================================"
+
+          echo
+          echo "Environment:"
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}"
+          echo "ANDROID_NDK=${ANDROID_NDK}"
+          echo "ANDROID_NDK_HOME=${ANDROID_NDK_HOME:-}"
+          echo "RUST_TARGET=${RUST_TARGET}"
+          echo "ANDROID_ABI=${ANDROID_ABI}"
+
+          echo
+          echo "Native build script:"
+          ls -lh tools/build-android-arm64.sh
 
           bash -x tools/build-android-arm64.sh \
             2>&1 | tee android-arm64-build.log
@@ -679,7 +881,7 @@ jobs:
           exit "$status"
 
       # ------------------------------------------------------------
-      # 18. ALWAYS UPLOAD NATIVE BUILD LOG
+      # 20. ALWAYS UPLOAD NATIVE BUILD LOG
       # ------------------------------------------------------------
       - name: Upload Android ARM64 build diagnostics
         if: always()
@@ -690,7 +892,7 @@ jobs:
           if-no-files-found: warn
 
       # ------------------------------------------------------------
-      # 19. VERIFY BUILT ELF
+      # 21. VERIFY BUILT ELF
       # ------------------------------------------------------------
       - name: Verify Android ARM64 ELF
         shell: bash
@@ -731,7 +933,7 @@ jobs:
           echo "AArch64 ELF verified."
 
       # ------------------------------------------------------------
-      # 20. PACKAGE NATIVE LIBRARY INTO JNI
+      # 22. PACKAGE NATIVE LIBRARY INTO JNI
       # ------------------------------------------------------------
       - name: Package native ARM64 library
         shell: bash
@@ -769,7 +971,7 @@ jobs:
           echo "Native package hash verified."
 
       # ------------------------------------------------------------
-      # 21. VERIFY ANDROID PACKAGE
+      # 23. VERIFY ANDROID PACKAGE
       # ------------------------------------------------------------
       - name: Verify Android native package
         shell: bash
@@ -789,7 +991,7 @@ jobs:
           fi
 
       # ------------------------------------------------------------
-      # 22. SET UP GRADLE
+      # 24. SET UP GRADLE
       # ------------------------------------------------------------
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
@@ -797,7 +999,7 @@ jobs:
           gradle-version: "8.10.2"
 
       # ------------------------------------------------------------
-      # 23. BUILD DEBUG APK
+      # 25. BUILD DEBUG APK
       # ------------------------------------------------------------
       - name: Build Android debug APK
         working-directory: android-app
@@ -813,7 +1015,7 @@ jobs:
             assembleDebug
 
       # ------------------------------------------------------------
-      # 24. VERIFY DEBUG APK
+      # 26. VERIFY DEBUG APK
       # ------------------------------------------------------------
       - name: Verify debug APK
         shell: bash
@@ -845,7 +1047,7 @@ jobs:
           echo "APK verification successful."
 
       # ------------------------------------------------------------
-      # 25. CREATE TEMPORARY CI KEYSTORE
+      # 27. CREATE TEMPORARY CI KEYSTORE
       # ------------------------------------------------------------
       - name: Create temporary CI signing keystore
         shell: bash
@@ -871,7 +1073,7 @@ jobs:
           echo "Temporary CI keystore created."
 
       # ------------------------------------------------------------
-      # 26. LOCATE ANDROID BUILD TOOLS
+      # 28. LOCATE ANDROID BUILD TOOLS
       # ------------------------------------------------------------
       - name: Locate Android signing tools
         shell: bash
@@ -891,7 +1093,7 @@ jobs:
           "${BUILD_TOOLS}/apksigner" version
 
       # ------------------------------------------------------------
-      # 27. ZIPALIGN APK
+      # 29. ZIPALIGN APK
       # ------------------------------------------------------------
       - name: Zipalign debug APK
         shell: bash
@@ -921,7 +1123,7 @@ jobs:
             "$ALIGNED_APK"
 
       # ------------------------------------------------------------
-      # 28. SIGN APK
+      # 30. SIGN APK
       # ------------------------------------------------------------
       - name: Sign Android APK
         shell: bash
@@ -949,7 +1151,7 @@ jobs:
           ls -lh "$SIGNED_APK"
 
       # ------------------------------------------------------------
-      # 29. VERIFY SIGNED APK
+      # 31. VERIFY SIGNED APK
       # ------------------------------------------------------------
       - name: Verify signed APK
         shell: bash
@@ -985,7 +1187,7 @@ jobs:
           fi
 
       # ------------------------------------------------------------
-      # 30. FINAL SIGNED APK REGRESSION CHECK
+      # 32. FINAL SIGNED APK REGRESSION CHECK
       # ------------------------------------------------------------
       - name: Final signed APK regression verification
         shell: bash
@@ -1035,7 +1237,7 @@ jobs:
           sha256sum "$SIGNED_APK"
 
       # ------------------------------------------------------------
-      # 31. UPLOAD FINAL APK
+      # 33. UPLOAD FINAL APK
       # ------------------------------------------------------------
       - name: Upload signed APK
         if: success()
@@ -1046,7 +1248,7 @@ jobs:
           if-no-files-found: error
 
       # ------------------------------------------------------------
-      # 32. UPLOAD RAW NATIVE NODE
+      # 34. UPLOAD RAW NATIVE NODE
       # ------------------------------------------------------------
       - name: Upload raw Android ARM64 native node
         if: success()
@@ -1057,7 +1259,7 @@ jobs:
           if-no-files-found: error
 
       # ------------------------------------------------------------
-      # 33. UPLOAD DIAGNOSTIC SOURCE FILES
+      # 35. UPLOAD DIAGNOSTIC SOURCE FILES
       # ------------------------------------------------------------
       - name: Upload diagnostic source files
         if: always()
@@ -1073,7 +1275,7 @@ jobs:
           if-no-files-found: warn
 
       # ------------------------------------------------------------
-      # 34. CLEAN TEMPORARY SIGNING MATERIAL
+      # 36. CLEAN TEMPORARY SIGNING MATERIAL
       # ------------------------------------------------------------
       - name: Clean temporary signing material
         if: always()
