@@ -1,4 +1,4 @@
-name: Build, Sign and Verify YORTAL Node v0.29 (Zebra-Speed Parallel)
+name: Build, Sign and Verify YORTAL Node v0.29.1 (Zebra-Speed Batched)
 
 on:
   workflow_dispatch:
@@ -16,7 +16,7 @@ env:
   ANDROID_API: "35"
   ANDROID_NDK: "27.2.12479018"
   RUST_TARGET: "aarch64-linux-android"
-  YORTAL_VERSION: "0.29.0"
+  YORTAL_VERSION: "0.29.1"
   ANDROID_ABI: "arm64-v8a"
 
   # Temporary CI signing configuration.
@@ -288,10 +288,19 @@ jobs:
           need "/YcashAndroid:${YORTAL_VERSION}/" "$MAIN" "P2P user agent ${YORTAL_VERSION}"
           need "versionName '${YORTAL_VERSION}-node'" android-app/app/build.gradle "APK versionName"
 
-          # Stage 0: parallel header Equihash
-          need "fn parallel_check_pow" "$MAIN" "parallel header PoW function"
-          need "parallel_check_pow(&batch)?;" "$MAIN" "parallel PoW runs before contextual header checks"
-          need "validate_header_opts(h,*height,&prev,mtp_time,hist_start,&hist,false)" "$MAIN" "contextual header rules still run"
+          # Stage 0: batched headers (parallel Equihash, in-memory window, 1 tx)
+          need "fn first_bad_pow" "$MAIN" "parallel header PoW function"
+          need "first_bad_pow(&batch)" "$MAIN" "parallel PoW runs before contextual header checks"
+          need "struct HeaderWindow" "$MAIN" "in-memory header context window"
+          need "validate_header_opts(h,height,&prev,mtp_time,hist_start,&hist,false)" "$MAIN" "contextual header rules still run"
+          need "state.put_headers_batch(&rows)" "$MAIN" "header batch committed in one transaction"
+          need "pub fn put_headers_batch" "$STATE" "state batched header write"
+          need "pub fn header_rows_range" "$STATE" "state header window seed query"
+
+          # Block-side batching
+          need "const HEDGE_AFTER" "$PIPE" "hedged head-of-line range"
+          need "const COMMIT_LINGER" "$PIPE" "commit linger batching"
+          need "release_if_current(lease.id, lease.generation)" "$PIPE" "generation-safe lease release"
           need "pub fn validate_header_opts" "$CONS" "consensus validate_header_opts"
           need "validate_header_opts(header,height,prev,mtp,history_start_height,history,true)" "$CONS" "validate_header keeps full PoW path"
 
@@ -1612,6 +1621,7 @@ jobs:
             crates/consensus/src/lib.rs
             config/pipeline.toml
             PARALLEL_V0.29_ZEBRA_SPEED.md
+            BATCHED_V0.29.1.md
             android-app/app/src/main/java/com/ycash/androidnode/MainActivity.java
             android-app/app/src/main/java/com/ycash/androidnode/NodeService.java
           if-no-files-found: warn
