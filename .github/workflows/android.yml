@@ -274,13 +274,7 @@ jobs:
           echo "Installing Android SDK and NDK"
           echo "============================================================"
 
-          echo
-          echo "Accepting Android SDK licenses..."
-
           yes | sdkmanager --licenses >/dev/null || true
-
-          echo
-          echo "Installing required Android packages..."
 
           sdkmanager \
             "platform-tools" \
@@ -419,7 +413,9 @@ jobs:
           cat "$PIPELINE_CONFIG"
 
           echo
-          echo "Checking required sequential settings..."
+          echo "============================================================"
+          echo "Checking sequential settings"
+          echo "============================================================"
 
           grep -Eq '^[[:space:]]*min_window[[:space:]]*=[[:space:]]*16[[:space:]]*$' \
             "$PIPELINE_CONFIG"
@@ -440,14 +436,24 @@ jobs:
             "$PIPELINE_CONFIG"
 
           echo
-          echo "Checking hard maximum range size..."
+          echo "All sequential configuration values are correct."
+
+          echo
+          echo "============================================================"
+          echo "Checking hard maximum range length"
+          echo "============================================================"
 
           grep -Eq \
             'const MAX_RANGE_LEN:[[:space:]]*u64[[:space:]]*=[[:space:]]*16[[:space:]]*;' \
             "$PIPELINE_SOURCE"
 
           echo
-          echo "Checking adaptive defaults..."
+          echo "MAX_RANGE_LEN = 16 verified."
+
+          echo
+          echo "============================================================"
+          echo "Checking adaptive window defaults"
+          echo "============================================================"
 
           grep -Eq 'min_window:[[:space:]]*16' \
             "$ADAPTIVE_SOURCE"
@@ -457,6 +463,24 @@ jobs:
 
           grep -Eq 'max_window:[[:space:]]*16' \
             "$ADAPTIVE_SOURCE"
+
+          echo
+          echo "Adaptive window is permanently capped at 16."
+
+          echo
+          echo "============================================================"
+          echo "Checking for old 64-block range limit"
+          echo "============================================================"
+
+          if grep -Eq \
+            'const MAX_RANGE_LEN:[[:space:]]*u64[[:space:]]*=[[:space:]]*64[[:space:]]*;' \
+            "$PIPELINE_SOURCE"; then
+
+            echo "ERROR: Old MAX_RANGE_LEN=64 is still present." >&2
+            exit 1
+          fi
+
+          echo "No MAX_RANGE_LEN=64 declaration found."
 
           echo
           echo "============================================================"
@@ -469,11 +493,20 @@ jobs:
           echo "In-flight ranges:       1"
           echo "Validation workers:     1"
           echo "Adaptive growth:        disabled"
+          echo
+          echo "Expected execution:"
+          echo "  Get 16 blocks"
+          echo "       ↓"
+          echo "  Validate 16"
+          echo "       ↓"
+          echo "  Commit 16"
+          echo "       ↓"
+          echo "  Get next 16"
 
       # ------------------------------------------------------------
       # 9. RUST REGRESSION TESTS
       # ------------------------------------------------------------
-      - name: Run Rust regression tests
+      - name: Run Rust workspace regression tests
         shell: bash
         run: |
           set -euo pipefail
@@ -523,19 +556,11 @@ jobs:
 
           NDK_ROOT="${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK}"
 
-          if [[ ! -d "$NDK_ROOT" ]]; then
-            echo "ERROR: Requested NDK does not exist:"
-            echo "$NDK_ROOT"
-            exit 1
-          fi
+          test -d "$NDK_ROOT"
 
           TOOLCHAIN="${NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
-          if [[ ! -d "$TOOLCHAIN" ]]; then
-            echo "ERROR: LLVM toolchain directory does not exist:"
-            echo "$TOOLCHAIN"
-            exit 1
-          fi
+          test -d "$TOOLCHAIN"
 
           CLANG="${TOOLCHAIN}/aarch64-linux-android${ANDROID_API}-clang"
           AR="${TOOLCHAIN}/llvm-ar"
@@ -564,13 +589,6 @@ jobs:
           test -x "$AR"
           test -x "$RANLIB"
           test -x "$STRIP"
-
-          echo
-          echo "FOUND:"
-          echo "  $CLANG"
-          echo "  $AR"
-          echo "  $RANLIB"
-          echo "  $STRIP"
 
           TOOL_WRAPPER_DIR="$RUNNER_TEMP/android-aarch64-tools"
 
@@ -609,13 +627,6 @@ jobs:
             "$TOOL_WRAPPER_DIR/aarch64-linux-android-clang" \
             "$TOOL_WRAPPER_DIR/aarch64-linux-android${ANDROID_API}-clang"
 
-          echo
-          echo "============================================================"
-          echo "Android ARM64 wrapper tools"
-          echo "============================================================"
-
-          ls -la "$TOOL_WRAPPER_DIR"
-
           export PATH="$TOOL_WRAPPER_DIR:$TOOLCHAIN:$PATH"
 
           echo "$TOOL_WRAPPER_DIR" >> "$GITHUB_PATH"
@@ -629,11 +640,6 @@ jobs:
             echo "CC_aarch64_linux_android=$CLANG"
             echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$CLANG"
           } >> "$GITHUB_ENV"
-
-          echo
-          echo "============================================================"
-          echo "Writing Cargo target configuration"
-          echo "============================================================"
 
           mkdir -p "$HOME/.cargo"
 
@@ -651,9 +657,7 @@ jobs:
           cat "$HOME/.cargo/config.toml"
 
           echo
-          echo "============================================================"
-          echo "Verifying target-prefixed tools"
-          echo "============================================================"
+          echo "Verifying target-prefixed tools..."
 
           command -v aarch64-linux-android-ar
           command -v aarch64-linux-android-ranlib
@@ -1352,25 +1356,15 @@ jobs:
           ZIPALIGN="${BUILD_TOOLS}/zipalign"
           APKSIGNER="${BUILD_TOOLS}/apksigner"
 
-          echo
-          echo "Build-tools directory:"
-          echo "$BUILD_TOOLS"
-
-          echo
-          echo "Checking zipalign..."
-
           test -x "$ZIPALIGN"
 
+          echo
           echo "zipalign found:"
           ls -lh "$ZIPALIGN"
 
           echo
-          echo "============================================================"
-          echo "zipalign usage"
-          echo "============================================================"
+          echo "zipalign usage:"
 
-          # zipalign does NOT support -h.
-          # Running it without arguments prints its usage and exits non-zero.
           ZIPALIGN_OUTPUT="$("$ZIPALIGN" 2>&1 || true)"
 
           echo "$ZIPALIGN_OUTPUT"
@@ -1392,16 +1386,12 @@ jobs:
           ls -lh "$APKSIGNER"
 
           echo
-          echo "============================================================"
-          echo "apksigner version"
-          echo "============================================================"
+          echo "apksigner version:"
 
           "$APKSIGNER" version
 
           echo
-          echo "============================================================"
-          echo "Android signing tools verified"
-          echo "============================================================"
+          echo "Android signing tools verified."
 
       # ------------------------------------------------------------
       # 29. ZIPALIGN APK
