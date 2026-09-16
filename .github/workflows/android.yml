@@ -36,15 +36,12 @@ jobs:
       # 1. CHECKOUT
       # ------------------------------------------------------------
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # ------------------------------------------------------------
       # 2. PREPARE PROJECT ROOT
       #
-      # The repository may contain the project as a ZIP instead of
-      # having Cargo.toml/crates/android-app directly at the root.
-      #
-      # This step supports BOTH layouts:
+      # Supports both:
       #
       #   Layout A:
       #     Cargo.toml
@@ -54,7 +51,8 @@ jobs:
       #   Layout B:
       #     YORTAL-NODE-....zip
       #
-      # If Layout B is used, the ZIP is automatically extracted.
+      # If the repository contains the project as a ZIP, the ZIP is
+      # automatically extracted and copied into the workspace.
       # ------------------------------------------------------------
       - name: Prepare project root from ZIP
         shell: bash
@@ -98,6 +96,7 @@ jobs:
 
           echo
           echo "Extracting ZIP..."
+
           unzip -q "$ZIP_FILE" -d "$TMP_DIR"
 
           echo "ZIP extraction completed."
@@ -157,7 +156,7 @@ jobs:
           echo
           echo "Copying extracted project into GitHub workspace..."
 
-          # Do not copy the ZIP's Git metadata.
+          # Do not copy Git metadata.
           # Do not overwrite the active GitHub workflow.
           rsync -a \
             --exclude='.git/' \
@@ -209,23 +208,37 @@ jobs:
       # 4. JAVA
       # ------------------------------------------------------------
       - name: Set up Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
 
       # ------------------------------------------------------------
       # 5. ANDROID SDK / NDK
+      #
+      # IMPORTANT:
+      # packages: ''
+      #
+      # setup-android otherwise attempts to install the legacy
+      # "tools" package, which causes sdkmanager to fail.
+      # Required SDK packages are installed explicitly below.
       # ------------------------------------------------------------
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          packages: ''
 
       - name: Install Android SDK and NDK
         shell: bash
         run: |
           set -euo pipefail
 
+          echo "Accepting Android SDK licenses..."
+
           yes | sdkmanager --licenses >/dev/null || true
+
+          echo
+          echo "Installing required Android packages..."
 
           sdkmanager \
             "platform-tools" \
@@ -241,7 +254,13 @@ jobs:
           echo "Android NDK:"
           echo "${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK}"
 
+          test -d "${ANDROID_SDK_ROOT}"
+          test -d "${ANDROID_SDK_ROOT}/platforms/android-${ANDROID_API}"
+          test -d "${ANDROID_SDK_ROOT}/build-tools/35.0.0"
           test -d "${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK}"
+
+          echo
+          echo "Android SDK and NDK verified."
 
       # ------------------------------------------------------------
       # 6. RUST
@@ -254,12 +273,11 @@ jobs:
       # ------------------------------------------------------------
       # 7. VERIFY RUST TARGET
       #
-      # IMPORTANT:
       # Do NOT use:
       #
       #   rustup target list --installed | grep -q ...
       #
-      # together with pipefail. grep -q can close the pipe early and
+      # with pipefail because grep -q can close the pipe early and
       # cause rustup to receive SIGPIPE.
       # ------------------------------------------------------------
       - name: Verify Rust workspace and target
@@ -632,7 +650,7 @@ jobs:
       # ------------------------------------------------------------
       - name: Upload Android ARM64 build diagnostics
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ycash-android-arm64-build-log
           path: android-arm64-build.log
@@ -664,7 +682,11 @@ jobs:
           echo
           echo "Checking ELF machine architecture..."
 
-          ELF_MACHINE="$(readelf -h "$NATIVE_LIB" | awk -F: '/Machine:/ {print $2}' | xargs)"
+          ELF_MACHINE="$(
+            readelf -h "$NATIVE_LIB" |
+            awk -F: '/Machine:/ {print $2}' |
+            xargs
+          )"
 
           echo "ELF machine: $ELF_MACHINE"
 
@@ -735,7 +757,7 @@ jobs:
       # 21. SET UP GRADLE
       # ------------------------------------------------------------
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: "8.10.2"
 
@@ -979,7 +1001,7 @@ jobs:
       # ------------------------------------------------------------
       - name: Upload signed APK
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ycash-android-node-signed
           path: android-app/app/build/outputs/apk/debug/ycash-android-node-signed.apk
@@ -990,7 +1012,7 @@ jobs:
       # ------------------------------------------------------------
       - name: Upload raw Android ARM64 native node
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ycash-android-node-arm64-native
           path: target/aarch64-linux-android/release/libycashandroidnode.so
@@ -1001,7 +1023,7 @@ jobs:
       # ------------------------------------------------------------
       - name: Upload diagnostic source files
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ycash-android-node-diagnostics
           path: |
@@ -1025,5 +1047,4 @@ jobs:
 
           echo "Temporary signing material cleaned."
 
-          # Never fail the workflow because cleanup itself failed.
           true
