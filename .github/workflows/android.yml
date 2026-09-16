@@ -145,7 +145,10 @@ jobs:
             bash tools/verify-p2p-fix.sh
           fi
           grep -q 'getheaders' crates/ycash-android-node/src/main.rs
-          grep -q 'getdata' crates/ycash-android-node/src/main.rs
+          # getdata now lives in pipeline_sync.rs (moved there by the v0.23
+          # concurrent pipeline refactor), so check the whole crate rather
+          # than only main.rs.
+          grep -Rq 'getdata' crates/ycash-android-node/src
           grep -q '8833' crates/ycash-android-node/src/main.rs
           grep -q '8832' crates/ycash-android-node/src/main.rs
           grep -q '8834' crates/ycash-android-node/src/main.rs
@@ -429,4 +432,3 @@ jobs:
         if: always()
         shell: bash
         run: rm -f "$CI_KEYSTORE"
-
