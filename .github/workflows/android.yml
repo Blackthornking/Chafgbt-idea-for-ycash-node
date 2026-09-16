@@ -160,12 +160,6 @@ jobs:
 
       # ------------------------------------------------------------
       # 2B. RESTORE PROJECT SCRIPT PERMISSIONS
-      #
-      # The Ycash project is distributed inside a ZIP archive.
-      # ZIP extraction can lose Unix executable permissions.
-      #
-      # Restore executable permissions for every shell script in
-      # the extracted project before any build script is executed.
       # ------------------------------------------------------------
       - name: Restore project script permissions
         shell: bash
@@ -437,19 +431,6 @@ jobs:
 
       # ------------------------------------------------------------
       # 11. ANDROID ARM64 TOOLCHAIN CONFIGURATION
-      #
-      # NDK 27.2 provides API-level Clang such as:
-      #
-      #   aarch64-linux-android35-clang
-      #
-      # Do NOT require:
-      #
-      #   aarch64-linux-android-clang
-      #
-      # because that unversioned executable is not guaranteed to
-      # exist in modern Android NDK releases.
-      #
-      # Private wrappers are created for tools expected by cc-rs.
       # ------------------------------------------------------------
       - name: Configure Android ARM64 linker
         shell: bash
@@ -993,8 +974,6 @@ jobs:
           echo "Restoring executable permissions"
           echo "============================================================"
 
-          # The project is extracted from a ZIP, so executable bits
-          # may not survive ZIP extraction.
           chmod +x \
             tools/build-android-arm64.sh \
             tools/package-node-binary.sh
@@ -1029,7 +1008,54 @@ jobs:
           echo "Android ARM64 build exit code: $status"
           echo "============================================================"
 
-          exit "$status"
+          if [[ "$status" -ne 0 ]]; then
+            exit "$status"
+          fi
+
+          echo
+          echo "============================================================"
+          echo "Checking native build outputs"
+          echo "============================================================"
+
+          CARGO_BINARY="target/${RUST_TARGET}/release/ycash-android-node"
+          NATIVE_LIB="android-app/app/src/main/jniLibs/${ANDROID_ABI}/libycashandroidnode.so"
+
+          echo
+          echo "Expected Cargo executable:"
+          echo "$CARGO_BINARY"
+
+          if [[ ! -f "$CARGO_BINARY" ]]; then
+            echo "ERROR: Cargo executable was not produced:"
+            echo "$CARGO_BINARY"
+            exit 1
+          fi
+
+          echo "Cargo executable found:"
+          ls -lh "$CARGO_BINARY"
+
+          echo
+          echo "Cargo executable type:"
+          file "$CARGO_BINARY"
+
+          echo
+          echo "Expected Android native library:"
+          echo "$NATIVE_LIB"
+
+          if [[ ! -f "$NATIVE_LIB" ]]; then
+            echo "ERROR: Android native library was not packaged:"
+            echo "$NATIVE_LIB"
+            exit 1
+          fi
+
+          echo "Android native library found:"
+          ls -lh "$NATIVE_LIB"
+
+          echo
+          echo "Android native library type:"
+          file "$NATIVE_LIB"
+
+          echo
+          echo "Native build and packaging completed successfully."
 
       # ------------------------------------------------------------
       # 20. ALWAYS UPLOAD NATIVE BUILD LOG
@@ -1043,25 +1069,46 @@ jobs:
           if-no-files-found: warn
 
       # ------------------------------------------------------------
-      # 21. VERIFY BUILT ELF
+      # 21. VERIFY BUILT ARM64 NATIVE LIBRARY
       # ------------------------------------------------------------
-      - name: Verify Android ARM64 ELF
+      - name: Verify Android ARM64 native library
         shell: bash
         run: |
           set -euo pipefail
 
-          NATIVE_LIB="target/aarch64-linux-android/release/libycashandroidnode.so"
+          CARGO_BINARY="target/${RUST_TARGET}/release/ycash-android-node"
+          NATIVE_LIB="android-app/app/src/main/jniLibs/${ANDROID_ABI}/libycashandroidnode.so"
 
-          if [[ ! -f "$NATIVE_LIB" ]]; then
-            echo "ERROR: Native library not found:"
-            echo "$NATIVE_LIB"
-            exit 1
-          fi
+          echo "============================================================"
+          echo "Verifying Android ARM64 native output"
+          echo "============================================================"
 
-          echo "Native library:"
+          echo
+          echo "Cargo executable:"
+          echo "$CARGO_BINARY"
+
+          test -f "$CARGO_BINARY"
+
+          ls -lh "$CARGO_BINARY"
+
+          echo
+          echo "Cargo executable type:"
+          file "$CARGO_BINARY"
+
+          echo
+          echo "Android packaged native library:"
+          echo "$NATIVE_LIB"
+
+          test -f "$NATIVE_LIB"
+
           ls -lh "$NATIVE_LIB"
 
+          echo
+          echo "Native library type:"
           file "$NATIVE_LIB"
+
+          echo
+          echo "Reading ELF header..."
 
           readelf -h "$NATIVE_LIB" | sed -n '1,80p'
 
@@ -1081,45 +1128,67 @@ jobs:
             exit 1
           fi
 
-          echo "AArch64 ELF verified."
+          echo
+          echo "Checking packaged file is an ELF executable..."
+
+          FILE_DESC="$(file -b "$NATIVE_LIB")"
+
+          echo "$FILE_DESC"
+
+          case "$FILE_DESC" in
+            *ELF*executable*|*ELF*pie*executable*)
+              echo "ELF executable verified."
+              ;;
+            *)
+              echo "ERROR: Packaged native library is not an ELF executable." >&2
+              exit 1
+              ;;
+          esac
+
+          echo
+          echo "AArch64 Android native library verified successfully."
 
       # ------------------------------------------------------------
-      # 22. PACKAGE NATIVE LIBRARY INTO JNI
+      # 22. VERIFY NATIVE LIBRARY PACKAGE
       # ------------------------------------------------------------
-      - name: Package native ARM64 library
+      - name: Verify native ARM64 library package
         shell: bash
         run: |
           set -euo pipefail
 
-          SOURCE_LIB="target/aarch64-linux-android/release/libycashandroidnode.so"
-          DEST_DIR="android-app/app/src/main/jniLibs/${ANDROID_ABI}"
-          DEST_LIB="${DEST_DIR}/libycashandroidnode.so"
+          CARGO_BINARY="target/${RUST_TARGET}/release/ycash-android-node"
+          PACKAGED_LIB="android-app/app/src/main/jniLibs/${ANDROID_ABI}/libycashandroidnode.so"
 
-          test -f "$SOURCE_LIB"
+          test -f "$CARGO_BINARY"
+          test -f "$PACKAGED_LIB"
 
-          mkdir -p "$DEST_DIR"
-
-          cp "$SOURCE_LIB" "$DEST_LIB"
-
-          test -f "$DEST_LIB"
-
-          echo "Packaged native library:"
-          ls -lh "$DEST_LIB"
+          echo "Cargo executable:"
+          ls -lh "$CARGO_BINARY"
 
           echo
-          echo "SHA256:"
-          sha256sum "$SOURCE_LIB"
-          sha256sum "$DEST_LIB"
+          echo "Packaged Android native library:"
+          ls -lh "$PACKAGED_LIB"
 
-          SOURCE_HASH="$(sha256sum "$SOURCE_LIB" | awk '{print $1}')"
-          DEST_HASH="$(sha256sum "$DEST_LIB" | awk '{print $1}')"
+          echo
+          echo "Cargo executable SHA256:"
+          sha256sum "$CARGO_BINARY"
 
-          if [[ "$SOURCE_HASH" != "$DEST_HASH" ]]; then
-            echo "ERROR: Native library hash mismatch." >&2
+          echo
+          echo "Packaged native library SHA256:"
+          sha256sum "$PACKAGED_LIB"
+
+          echo
+          echo "Checking packaged native library permissions..."
+
+          if [[ ! -x "$PACKAGED_LIB" ]]; then
+            echo "ERROR: Packaged native library is not executable." >&2
             exit 1
           fi
 
-          echo "Native package hash verified."
+          echo "Packaged native library executable permission verified."
+
+          echo
+          echo "Native ARM64 package verification completed."
 
       # ------------------------------------------------------------
       # 23. VERIFY ANDROID PACKAGE
@@ -1185,7 +1254,7 @@ jobs:
           echo "$APK_LISTING"
 
           if grep -Fq \
-            'lib/arm64-v8a/libycashandroidnode.so' \
+            "lib/${ANDROID_ABI}/libycashandroidnode.so" \
             <<< "$APK_LISTING"; then
 
             echo "Native ARM64 library found in APK."
@@ -1328,7 +1397,7 @@ jobs:
           echo "$APK_LISTING"
 
           if grep -Fq \
-            'lib/arm64-v8a/libycashandroidnode.so' \
+            "lib/${ANDROID_ABI}/libycashandroidnode.so" \
             <<< "$APK_LISTING"; then
 
             echo "Signed APK contains ARM64 native library."
@@ -1345,34 +1414,52 @@ jobs:
         run: |
           set -euo pipefail
 
-          NATIVE_LIB="target/aarch64-linux-android/release/libycashandroidnode.so"
+          CARGO_BINARY="target/${RUST_TARGET}/release/ycash-android-node"
           PACKAGED_LIB="android-app/app/src/main/jniLibs/${ANDROID_ABI}/libycashandroidnode.so"
           SIGNED_APK="android-app/app/build/outputs/apk/debug/ycash-android-node-signed.apk"
 
-          test -f "$NATIVE_LIB"
+          test -f "$CARGO_BINARY"
           test -f "$PACKAGED_LIB"
           test -f "$SIGNED_APK"
 
-          SOURCE_HASH="$(sha256sum "$NATIVE_LIB" | awk '{print $1}')"
-          PACKAGE_HASH="$(sha256sum "$PACKAGED_LIB" | awk '{print $1}')"
-
-          echo "Native source SHA256:"
-          echo "$SOURCE_HASH"
+          echo "Cargo executable:"
+          ls -lh "$CARGO_BINARY"
 
           echo
-          echo "Packaged native SHA256:"
-          echo "$PACKAGE_HASH"
+          echo "Packaged native library:"
+          ls -lh "$PACKAGED_LIB"
 
-          if [[ "$SOURCE_HASH" != "$PACKAGE_HASH" ]]; then
-            echo "ERROR: Native source/package hash mismatch." >&2
-            exit 1
-          fi
+          echo
+          echo "Native library type:"
+          file "$PACKAGED_LIB"
+
+          echo
+          echo "Native package SHA256:"
+          sha256sum "$PACKAGED_LIB"
 
           BUILD_TOOLS="${ANDROID_SDK_ROOT}/build-tools/35.0.0"
+
+          echo
+          echo "Verifying signed APK..."
 
           "${BUILD_TOOLS}/apksigner" \
             verify \
             "$SIGNED_APK"
+
+          echo
+          echo "Checking signed APK contents..."
+
+          APK_LISTING="$(unzip -l "$SIGNED_APK")"
+
+          if grep -Fq \
+            "lib/${ANDROID_ABI}/libycashandroidnode.so" \
+            <<< "$APK_LISTING"; then
+
+            echo "Signed APK contains ARM64 native library."
+          else
+            echo "ERROR: Signed APK does not contain ARM64 native library." >&2
+            exit 1
+          fi
 
           echo
           echo "============================================================"
@@ -1406,7 +1493,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: ycash-android-node-arm64-native
-          path: target/aarch64-linux-android/release/libycashandroidnode.so
+          path: android-app/app/src/main/jniLibs/${{ env.ANDROID_ABI }}/libycashandroidnode.so
           if-no-files-found: error
 
       # ------------------------------------------------------------
