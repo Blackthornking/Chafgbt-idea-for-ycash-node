@@ -1,7 +1,12 @@
-name: Build, Sign and Verify YORTAL Node v0.29.1 (Zebra-Speed Batched)
+name: Build, Sign and Verify YORTAL Node (any version)
 
 on:
   workflow_dispatch:
+    inputs:
+      zip:
+        description: "Project ZIP to build (file name). Blank = highest version found."
+        required: false
+        default: ""
   push:
     branches:
       - main
@@ -16,7 +21,7 @@ env:
   ANDROID_API: "35"
   ANDROID_NDK: "27.2.12479018"
   RUST_TARGET: "aarch64-linux-android"
-  YORTAL_VERSION: "0.29.1"
+  # YORTAL_VERSION is detected from crates/ycash-android-node/Cargo.toml.
   ANDROID_ABI: "arm64-v8a"
 
   # Temporary CI signing configuration.
@@ -28,7 +33,7 @@ env:
 
 jobs:
   build-android-node:
-    name: Build YORTAL v0.29 Android ARM64 Node
+    name: Build YORTAL Android ARM64 Node
     runs-on: ubuntu-24.04
 
     steps:
@@ -44,6 +49,8 @@ jobs:
       # ------------------------------------------------------------
       - name: Prepare project root from ZIP
         shell: bash
+        env:
+          ZIP_INPUT: ${{ github.event.inputs.zip }}
         run: |
           set -euo pipefail
 
@@ -64,15 +71,22 @@ jobs:
           echo "ZIP files in repository:"
           find "$GITHUB_WORKSPACE" -maxdepth 2 -type f -iname '*.zip' -printf '  %f\n' | sort -V || true
 
-          ZIP_FILE="$(
-            find "$GITHUB_WORKSPACE" \
-              -maxdepth 2 \
-              -type f \
-              \( -iname '*.zip' \) \
-              -print \
-              | sort -V \
-              | tail -n 1
-          )"
+          REQUESTED_ZIP="${ZIP_INPUT:-}"
+          if [[ -n "$REQUESTED_ZIP" ]]; then
+            ZIP_FILE="$(find "$GITHUB_WORKSPACE" -maxdepth 2 -type f -name "$REQUESTED_ZIP" -print | head -n 1)"
+            if [[ -z "$ZIP_FILE" ]]; then
+              echo "ERROR: requested ZIP '$REQUESTED_ZIP' not found." >&2
+              exit 1
+            fi
+          else
+            # Sort on the file NAME only, so folders don't affect the choice.
+            ZIP_FILE="$(
+              find "$GITHUB_WORKSPACE" -maxdepth 2 -type f -iname '*.zip' -printf '%f\t%p\n' \
+                | sort -V -k1,1 \
+                | tail -n 1 \
+                | cut -f2
+            )"
+          fi
 
           if [[ -z "$ZIP_FILE" ]]; then
             echo "ERROR: No ZIP file was found." >&2
@@ -256,88 +270,94 @@ jobs:
           echo "Build scripts are executable."
 
       # ------------------------------------------------------------
-      # 3B. VERIFY v0.29 ZEBRA-SPEED PARALLEL PIPELINE SOURCE
+      # 3B. DETECT VERSION + VERIFY SOURCE (works for any version)
       # ------------------------------------------------------------
-      - name: Verify v0.29 parallel pipeline source
+      - name: Detect YORTAL version
+        shell: bash
+        run: |
+          set -euo pipefail
+          CRATE="crates/ycash-android-node/Cargo.toml"
+          VERSION="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$CRATE" | head -n 1)"
+          if [[ -z "$VERSION" ]]; then
+            VERSION="$(sed -n "s/.*versionName '\([^'-]*\).*/\1/p" android-app/app/build.gradle | head -n 1)"
+          fi
+          if [[ -z "$VERSION" ]]; then
+            VERSION="unknown-${GITHUB_RUN_NUMBER}"
+          fi
+          echo "YORTAL_VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "Detected YORTAL version: ${VERSION}"
+          if [[ -f BUILD_ID.txt ]]; then echo "BUILD_ID: $(cat BUILD_ID.txt)"; fi
+
+      - name: Verify source
         shell: bash
         run: |
           set -euo pipefail
 
           echo "============================================================"
-          echo "Verifying YORTAL v${YORTAL_VERSION} parallel pipeline"
+          echo "Verifying YORTAL v${YORTAL_VERSION} source"
           echo "============================================================"
 
           PIPE="crates/ycash-android-node/src/pipeline_sync.rs"
           MAIN="crates/ycash-android-node/src/main.rs"
           CONS="crates/consensus/src/lib.rs"
-          STATE="crates/state/src/lib.rs"
 
           fail=0
+          warns=0
+          # Hard requirement: file must exist and contain the pattern.
           need() {
             local pattern="$1" file="$2" label="$3"
-            if grep -Fq -- "$pattern" "$file"; then
+            if [[ -f "$file" ]] && grep -Fq -- "$pattern" "$file"; then
               echo "PASS: $label"
             else
               echo "FAIL: $label  (missing '$pattern' in $file)" >&2
               fail=1
             fi
           }
+          # Informational: reported, never fails the build.
+          want() {
+            local pattern="$1" file="$2" label="$3"
+            if [[ -f "$file" ]] && grep -Fq -- "$pattern" "$file"; then
+              echo "OK:   $label"
+            else
+              echo "WARN: $label  (not found in $file)"
+              warns=$((warns+1))
+            fi
+          }
 
-          # Version
-          need "version = \"${YORTAL_VERSION}\"" crates/ycash-android-node/Cargo.toml "crate version ${YORTAL_VERSION}"
-          need "/YcashAndroid:${YORTAL_VERSION}/" "$MAIN" "P2P user agent ${YORTAL_VERSION}"
-          need "versionName '${YORTAL_VERSION}-node'" android-app/app/build.gradle "APK versionName"
+          # Version strings should agree (warn only)
+          want "version = \"${YORTAL_VERSION}\"" crates/ycash-android-node/Cargo.toml "crate version ${YORTAL_VERSION}"
+          want "/YcashAndroid:${YORTAL_VERSION}/" "$MAIN" "P2P user agent ${YORTAL_VERSION}"
+          want "versionName '${YORTAL_VERSION}-node'" android-app/app/build.gradle "APK versionName"
 
-          # Stage 0: batched headers (parallel Equihash, in-memory window, 1 tx)
-          need "fn first_bad_pow" "$MAIN" "parallel header PoW function"
-          need "first_bad_pow(&batch)" "$MAIN" "parallel PoW runs before contextual header checks"
-          need "struct HeaderWindow" "$MAIN" "in-memory header context window"
-          need "validate_header_opts(h,height,&prev,mtp_time,hist_start,&hist,false)" "$MAIN" "contextual header rules still run"
-          need "state.put_headers_batch(&rows)" "$MAIN" "header batch committed in one transaction"
-          need "pub fn put_headers_batch" "$STATE" "state batched header write"
-          need "pub fn header_rows_range" "$STATE" "state header window seed query"
+          # Build-critical files
+          need "fn main" "$MAIN" "android node main.rs"
+          [[ -f crates/ycash-android-node/src/runtime.rs ]] && echo "PASS: runtime.rs present" || { echo "FAIL: runtime.rs missing" >&2; fail=1; }
 
-          # Block-side batching
-          need "const HEDGE_AFTER" "$PIPE" "hedged head-of-line range"
-          need "const COMMIT_LINGER" "$PIPE" "commit linger batching"
-          need "release_if_current(lease.id, lease.generation)" "$PIPE" "generation-safe lease release"
-          need "pub fn validate_header_opts" "$CONS" "consensus validate_header_opts"
-          need "validate_header_opts(header,height,prev,mtp,history_start_height,history,true)" "$CONS" "validate_header keeps full PoW path"
-
-          # Stage 1-3: download / verify pool / ordered committer
-          need "pub fn start(&self, state: Arc<State>, live: SharedState)" "$PIPE" "pipeline start()"
-          need "fn verifier_loop" "$PIPE" "verifier thread pool"
-          need "fn committer_loop" "$PIPE" "ordered committer thread"
-          need "fn fetch_range" "$PIPE" "network fetch stage"
-          need "fn mtp_range" "$PIPE" "range median-time-past"
-          need "sync_channel::<VerifyJob>" "$PIPE" "bounded verify channel (backpressure)"
-          need "state.commit_blocks_batch(&blocks)" "$PIPE" "stateful checks via commit_blocks_batch"
-          need "validate_for_commit_opts(&raw, ctx, assume_valid)" "$PIPE" "contextless consensus checks"
-          need "pipeline.start(db.clone(),live.clone());" "$MAIN" "pipeline started by peer supervisor"
-          need "pub fn header_works_range" "$STATE" "batched chain-work lookup"
-
-          # Old v0.28 serial clamps must be gone
-          if grep -Fq "let workers = 1usize;" "$PIPE"; then
-            echo "FAIL: v0.28 sequential worker clamp still present in $PIPE" >&2
-            fail=1
+          # Consensus safety: if these constants exist they must not have drifted
+          if [[ -f "$PIPE" ]] && grep -Fq "ASSUME_VALID_HEIGHT" "$PIPE"; then
+            need "pub const ASSUME_VALID_HEIGHT: u64 = 2_250_000;" "$PIPE" "assume-valid checkpoint unchanged"
+            need "000003f98b7497fdcd8a6b6d10a93a887c5d47127e24a9dc3a40cb65754d21e7" "$PIPE" "assume-valid hash unchanged"
           else
-            echo "PASS: sequential worker clamp removed"
+            echo "INFO: no assume-valid checkpoint in this version"
           fi
 
-          # Consensus code that must stay untouched
-          need "pub fn validate_for_commit_opts" "$CONS" "validate_for_commit_opts present"
-          need "pub const ASSUME_VALID_HEIGHT: u64 = 2_250_000;" "$PIPE" "assume-valid checkpoint unchanged"
-          need "000003f98b7497fdcd8a6b6d10a93a887c5d47127e24a9dc3a40cb65754d21e7" "$PIPE" "assume-valid hash unchanged"
-
-          if [[ "$fail" -ne 0 ]]; then
-            echo
-            echo "ERROR: v${YORTAL_VERSION} parallel pipeline verification failed." >&2
-            echo "The ZIP is probably an older YORTAL build." >&2
-            exit 1
+          # Feature report (warn only, so older/newer versions still build)
+          want "pub fn validate_for_commit_opts" "$CONS" "contextless block validation"
+          want "fn committer_loop" "$PIPE" "ordered committer"
+          want "sync_channel::<VerifyJob>" "$PIPE" "bounded verify channel"
+          want "const HEDGE_AFTER" "$PIPE" "hedged head-of-line range"
+          want "fn open_reader" crates/state/src/lib.rs "read-only header connection"
+          if [[ -f "$PIPE" ]] && grep -Fq "let workers = 1usize;" "$PIPE"; then
+            echo "WARN: sequential worker clamp present"; warns=$((warns+1))
           fi
 
           echo
-          echo "Parallel pipeline source verified."
+          echo "Warnings: ${warns}"
+          if [[ "$fail" -ne 0 ]]; then
+            echo "ERROR: v${YORTAL_VERSION} source verification failed." >&2
+            exit 1
+          fi
+          echo "Source verified."
 
       # ------------------------------------------------------------
       # 4. JAVA
@@ -494,7 +514,7 @@ jobs:
           set -euo pipefail
 
           # Surfaces compile errors in the new pipeline before the long test run.
-          cargo check -p ycash-consensus -p ycash-state -p ycash-android-node --all-targets
+          cargo check --workspace --all-targets
 
       - name: Run Rust regression tests
         shell: bash
@@ -1590,7 +1610,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v7
         with:
-          name: yortal-node-v${{ env.YORTAL_VERSION }}-zebra-speed-signed
+          name: yortal-node-v${{ env.YORTAL_VERSION }}-signed
           path: android-app/app/build/outputs/apk/debug/ycash-android-node-signed.apk
           if-no-files-found: error
 
@@ -1620,8 +1640,9 @@ jobs:
             crates/ycash-android-node/src/pipeline_sync.rs
             crates/consensus/src/lib.rs
             config/pipeline.toml
-            PARALLEL_V0.29_ZEBRA_SPEED.md
-            BATCHED_V0.29.1.md
+            crates/state/src/lib.rs
+            BUILD_ID.txt
+            *.md
             android-app/app/src/main/java/com/ycash/androidnode/MainActivity.java
             android-app/app/src/main/java/com/ycash/androidnode/NodeService.java
           if-no-files-found: warn
