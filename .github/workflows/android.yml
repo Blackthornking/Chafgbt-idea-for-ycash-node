@@ -476,32 +476,161 @@ jobs:
             'const MAX_RANGE_LEN:[[:space:]]*u64[[:space:]]*=[[:space:]]*64[[:space:]]*;' \
             "$PIPELINE_SOURCE"; then
 
-            echo "ERROR: Old MAX_RANGE_LEN=64 is still present." >&2
-            exit 1
-          fi
+      # ------------------------------------------------------------
+      # 8B. VERIFY PARALLEL 4-WORKER PIPELINE CONFIGURATION
+      # ------------------------------------------------------------
+      - name: Verify parallel 4-worker pipeline configuration
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          echo "No MAX_RANGE_LEN=64 declaration found."
+          echo "============================================================"
+          echo "Verifying parallel 4-worker pipeline configuration"
+          echo "============================================================"
+
+          PIPELINE_CONFIG="config/pipeline.toml"
+          ADAPTIVE_SOURCE="crates/state/src/pipeline/adaptive.rs"
+          PIPELINE_SOURCE="crates/state/src/pipeline/mod.rs"
+
+          test -f "$PIPELINE_CONFIG"
+          test -f "$ADAPTIVE_SOURCE"
+          test -f "$PIPELINE_SOURCE"
+
+          echo
+          echo "Pipeline configuration:"
+          cat "$PIPELINE_CONFIG"
 
           echo
           echo "============================================================"
-          echo "Sequential pipeline configuration verified"
+          echo "Checking parallel worker settings"
+          echo "============================================================"
+
+          WORKERS="$(
+            sed -nE \
+              's/^[[:space:]]*max_validation_workers[[:space:]]*=[[:space:]]*([0-9]+)[[:space:]]*$/\1/p' \
+              "$PIPELINE_CONFIG"
+          )"
+
+          INFLIGHT="$(
+            sed -nE \
+              's/^[[:space:]]*max_inflight_ranges[[:space:]]*=[[:space:]]*([0-9]+)[[:space:]]*$/\1/p' \
+              "$PIPELINE_CONFIG"
+          )"
+
+          echo "Validation workers: $WORKERS"
+          echo "In-flight ranges:   $INFLIGHT"
+
+          if [[ -z "$WORKERS" ]]; then
+            echo "ERROR: max_validation_workers is missing." >&2
+            exit 1
+          fi
+
+          if [[ -z "$INFLIGHT" ]]; then
+            echo "ERROR: max_inflight_ranges is missing." >&2
+            exit 1
+          fi
+
+          if (( WORKERS < 4 )); then
+            echo "ERROR: Expected at least 4 validation workers." >&2
+            exit 1
+          fi
+
+          if (( INFLIGHT < 4 )); then
+            echo "ERROR: Expected at least 4 in-flight ranges." >&2
+            exit 1
+          fi
+
+          echo
+          echo "Parallel worker configuration verified."
+
+          echo
+          echo "============================================================"
+          echo "Checking fixed range length"
+          echo "============================================================"
+
+          grep -Eq \
+            'const MAX_RANGE_LEN:[[:space:]]*u64[[:space:]]*=[[:space:]]*16[[:space:]]*;' \
+            "$PIPELINE_SOURCE"
+
+          echo "MAX_RANGE_LEN = 16 verified."
+
+          echo
+          echo "============================================================"
+          echo "Checking adaptive window"
+          echo "============================================================"
+
+          grep -Eq 'min_window:[[:space:]]*16' \
+            "$ADAPTIVE_SOURCE"
+
+          grep -Eq 'initial_window:[[:space:]]*16' \
+            "$ADAPTIVE_SOURCE"
+
+          grep -Eq 'max_window:[[:space:]]*16' \
+            "$ADAPTIVE_SOURCE"
+
+          echo "Adaptive window limits verified."
+
+          echo
+          echo "============================================================"
+          echo "Checking ordered commit path"
+          echo "============================================================"
+
+          if grep -RniE \
+            'ordered.*commit|commit.*ordered|next_expected|next.*height' \
+            crates/state/src/pipeline \
+            >/tmp/ordered-commit-check.txt 2>/dev/null; then
+
+            cat /tmp/ordered-commit-check.txt
+            echo
+            echo "Ordered commit logic detected."
+          else
+            echo "ERROR: Could not detect ordered commit logic." >&2
+            exit 1
+          fi
+
+          echo
+          echo "============================================================"
+          echo "Checking for old single-worker assertions"
+          echo "============================================================"
+
+          if grep -Eq \
+            'max_validation_workers[[:space:]]*=[[:space:]]*1' \
+            "$PIPELINE_CONFIG"; then
+
+            echo "ERROR: max_validation_workers is still 1." >&2
+            exit 1
+          fi
+
+          if grep -Eq \
+            'max_inflight_ranges[[:space:]]*=[[:space:]]*1' \
+            "$PIPELINE_CONFIG"; then
+
+            echo "ERROR: max_inflight_ranges is still 1." >&2
+            exit 1
+          fi
+
+          echo "No old single-worker configuration found."
+
+          echo
+          echo "============================================================"
+          echo "PARALLEL PIPELINE CONFIGURATION VERIFIED"
           echo "============================================================"
 
           echo
           echo "Batch size:             16 blocks"
           echo "Maximum window:         16 blocks"
-          echo "In-flight ranges:       1"
-          echo "Validation workers:     1"
-          echo "Adaptive growth:        disabled"
+          echo "In-flight ranges:       ${INFLIGHT}"
+          echo "Validation workers:     ${WORKERS}"
+          echo "Ordered state commit:  REQUIRED"
           echo
           echo "Expected execution:"
-          echo "  Get 16 blocks"
-          echo "       ↓"
-          echo "  Validate 16"
-          echo "       ↓"
-          echo "  Commit 16"
-          echo "       ↓"
-          echo "  Get next 16"
+          echo "  Fetch multiple ranges"
+          echo "        ↓"
+          echo "  Validate concurrently"
+          echo "        ↓"
+          echo "  Buffer completed ranges"
+          echo "        ↓"
+          echo "  Commit strictly by height"
 
       # ------------------------------------------------------------
       # 9. RUST REGRESSION TESTS
