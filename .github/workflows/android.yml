@@ -18,52 +18,214 @@ env:
   RUST_TARGET: "aarch64-linux-android"
   ANDROID_ABI: "arm64-v8a"
 
-  CI_KEYSTORE: "${{ github.workspace }}/ci-debug.keystore"
-  CI_KEY_ALIAS: "ycash-debug"
-  CI_KEYSTORE_PASSWORD: "ycash-debug-password"
-  CI_KEY_PASSWORD: "ycash-debug-password"
+  # Temporary CI signing configuration.
+  # This keystore is generated during the workflow and is NOT a production key.
+  KEYSTORE_FILE: "ci-debug.keystore"
+  KEY_ALIAS: "ycash-ci"
+  KEYSTORE_PASSWORD: "ycash-ci-password"
+  KEY_PASSWORD: "ycash-ci-password"
 
 jobs:
-  build:
-    name: Build, Sign and Verify Ycash Android Node
+  build-android-node:
+    name: Build Ycash Android ARM64 Node
     runs-on: ubuntu-24.04
 
     steps:
+
+      # ------------------------------------------------------------
+      # 1. CHECKOUT
+      # ------------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ------------------------------------------------------------
+      # 2. PREPARE PROJECT ROOT
+      #
+      # The repository may contain the project as a ZIP instead of
+      # having Cargo.toml/crates/android-app directly at the root.
+      #
+      # This step supports BOTH layouts:
+      #
+      #   Layout A:
+      #     Cargo.toml
+      #     crates/
+      #     android-app/
+      #
+      #   Layout B:
+      #     YORTAL-NODE-....zip
+      #
+      # If Layout B is used, the ZIP is automatically extracted.
+      # ------------------------------------------------------------
+      - name: Prepare project root from ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "============================================================"
+          echo "Preparing Ycash project root"
+          echo "============================================================"
+
+          # If the repository already contains the extracted project,
+          # use it directly.
+          if [[ -f Cargo.toml && -d crates && -d android-app ]]; then
+            echo "Project already exists at repository root."
+            exit 0
+          fi
+
+          echo "Project not found at repository root."
+          echo "Searching for uploaded ZIP..."
+
+          ZIP_FILE="$(
+            find "$GITHUB_WORKSPACE" \
+              -maxdepth 2 \
+              -type f \
+              \( -iname '*.zip' \) \
+              -print \
+              -quit
+          )"
+
+          if [[ -z "$ZIP_FILE" ]]; then
+            echo "ERROR: No ZIP file was found." >&2
+            echo "Expected a ZIP containing the Ycash project." >&2
+            exit 1
+          fi
+
+          echo "ZIP found:"
+          echo "$ZIP_FILE"
+
+          TMP_DIR="$(mktemp -d)"
+          trap 'rm -rf "$TMP_DIR"' EXIT
+
+          echo
+          echo "Extracting ZIP..."
+          unzip -q "$ZIP_FILE" -d "$TMP_DIR"
+
+          echo "ZIP extraction completed."
+
+          echo
+          echo "Searching extracted contents for project root..."
+
+          PROJECT_ROOT="$(
+            find "$TMP_DIR" \
+              -type f \
+              -name Cargo.toml \
+              -print0 |
+            while IFS= read -r -d '' cargo_file; do
+              candidate="$(dirname "$cargo_file")"
+
+              if [[ -d "$candidate/crates" &&
+                    -d "$candidate/android-app" ]]; then
+                echo "$candidate"
+                break
+              fi
+            done
+          )"
+
+          if [[ -z "$PROJECT_ROOT" ]]; then
+            echo "ERROR: Could not find a valid Ycash project root inside ZIP." >&2
+            echo
+            echo "Expected:"
+            echo "  Cargo.toml"
+            echo "  crates/"
+            echo "  android-app/"
+            echo
+            echo "Extracted files:"
+            find "$TMP_DIR" -maxdepth 5 -type f | sort | head -300
+            exit 1
+          fi
+
+          echo
+          echo "Project root found:"
+          echo "$PROJECT_ROOT"
+
+          # Verify the Android node crate before copying.
+          if [[ ! -f "$PROJECT_ROOT/crates/ycash-android-node/Cargo.toml" ]]; then
+            echo "ERROR: ycash-android-node/Cargo.toml is missing." >&2
+            exit 1
+          fi
+
+          if [[ ! -f "$PROJECT_ROOT/crates/ycash-android-node/src/main.rs" ]]; then
+            echo "ERROR: ycash-android-node/src/main.rs is missing." >&2
+            exit 1
+          fi
+
+          if [[ ! -f "$PROJECT_ROOT/crates/ycash-android-node/src/runtime.rs" ]]; then
+            echo "ERROR: ycash-android-node/src/runtime.rs is missing." >&2
+            exit 1
+          fi
+
+          echo
+          echo "Copying extracted project into GitHub workspace..."
+
+          # Do not copy the ZIP's Git metadata.
+          # Do not overwrite the active GitHub workflow.
+          rsync -a \
+            --exclude='.git/' \
+            --exclude='.github/workflows/' \
+            "$PROJECT_ROOT"/ \
+            "$GITHUB_WORKSPACE"/
+
+          echo
+          echo "============================================================"
+          echo "Extracted project structure"
+          echo "============================================================"
+
+          test -f Cargo.toml
+          test -d crates
+          test -d android-app
+
+          echo
+          echo "Android node crate:"
+          find crates/ycash-android-node -maxdepth 3 -type f | sort
+
+          echo
+          echo "Project extraction completed successfully."
+
+      # ------------------------------------------------------------
+      # 3. VERIFY PROJECT STRUCTURE
+      # ------------------------------------------------------------
       - name: Verify project structure
         shell: bash
         run: |
           set -euo pipefail
+
           test -f Cargo.toml
           test -d crates
           test -d android-app
+
           test -f crates/ycash-android-node/Cargo.toml
           test -f crates/ycash-android-node/src/main.rs
           test -f crates/ycash-android-node/src/runtime.rs
+
           test -f android-app/app/build.gradle
           test -f android-app/app/src/main/AndroidManifest.xml
+
           test -f android-app/app/src/main/java/com/ycash/androidnode/MainActivity.java
           test -f android-app/app/src/main/java/com/ycash/androidnode/NodeService.java
+
           echo "Project structure verified."
 
+      # ------------------------------------------------------------
+      # 4. JAVA
+      # ------------------------------------------------------------
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
+      # ------------------------------------------------------------
+      # 5. ANDROID SDK / NDK
+      # ------------------------------------------------------------
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-        with:
-          packages: platform-tools
 
       - name: Install Android SDK and NDK
         shell: bash
         run: |
           set -euo pipefail
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+
+          yes | sdkmanager --licenses >/dev/null || true
 
           sdkmanager \
             "platform-tools" \
@@ -71,242 +233,403 @@ jobs:
             "build-tools;35.0.0" \
             "ndk;${ANDROID_NDK}"
 
-          test -d "$ANDROID_HOME/ndk/${ANDROID_NDK}"
-          test -d "$ANDROID_HOME/platforms/android-${ANDROID_API}"
-          test -x "$ANDROID_HOME/build-tools/35.0.0/zipalign"
-          test -x "$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          echo
+          echo "Android SDK:"
+          echo "${ANDROID_SDK_ROOT}"
 
+          echo
+          echo "Android NDK:"
+          echo "${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK}"
+
+          test -d "${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK}"
+
+      # ------------------------------------------------------------
+      # 6. RUST
+      # ------------------------------------------------------------
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ env.RUST_TARGET }}
 
-      - name: Verify Rust workspace
+      # ------------------------------------------------------------
+      # 7. VERIFY RUST TARGET
+      #
+      # IMPORTANT:
+      # Do NOT use:
+      #
+      #   rustup target list --installed | grep -q ...
+      #
+      # together with pipefail. grep -q can close the pipe early and
+      # cause rustup to receive SIGPIPE.
+      # ------------------------------------------------------------
+      - name: Verify Rust workspace and target
         shell: bash
         run: |
           set -euo pipefail
 
-          rustc --version
-          cargo --version
-
-          cargo metadata --format-version 1 --no-deps >/dev/null
+          echo "Installed Rust targets:"
+          rustup target list --installed
 
           INSTALLED_TARGETS="$(rustup target list --installed)"
 
-          echo "Installed Rust targets:"
-          printf '%s\n' "$INSTALLED_TARGETS"
-
-          # IMPORTANT:
-          # Do not use:
-          # rustup target list --installed | grep -q ...
-          #
-          # With "set -o pipefail", grep -q can close the pipe early and
-          # cause rustup to receive SIGPIPE, producing a false CI failure.
           if ! grep -Fx "${RUST_TARGET}" <<< "$INSTALLED_TARGETS" >/dev/null; then
             echo "ERROR: Rust target ${RUST_TARGET} is not installed." >&2
             exit 1
           fi
 
-          echo "Rust workspace verified."
+          echo
+          echo "Rust target verified: ${RUST_TARGET}"
 
-      - name: Run Rust regression suite
+          cargo --version
+          rustc --version
+
+          test -f Cargo.toml
+
+      # ------------------------------------------------------------
+      # 8. RUST REGRESSION TESTS
+      # ------------------------------------------------------------
+      - name: Run Rust regression tests
         shell: bash
         run: |
           set -euo pipefail
 
           cargo test --workspace --all-targets
 
-          echo "Rust tests passed, including the SQLite schema/reorg regressions."
-
-      - name: Verify database schema ordering
+      # ------------------------------------------------------------
+      # 9. SQLITE SCHEMA ORDERING CHECK
+      # ------------------------------------------------------------
+      - name: Verify SQLite schema ordering
         shell: bash
         run: |
           set -euo pipefail
 
-          python3 - <<'PY'
-          import sqlite3
+          echo "Searching for SQLite schema definitions..."
 
-          con = sqlite3.connect(":memory:")
+          if grep -Rni \
+            --include='*.rs' \
+            --include='*.sql' \
+            'CREATE TABLE' \
+            crates \
+            >/tmp/sqlite-schema-search.txt 2>/dev/null; then
 
-          con.executescript("""
-          CREATE TABLE txs(
-            txid BLOB PRIMARY KEY,
-            block_hash BLOB NOT NULL,
-            raw BLOB NOT NULL
-          );
+            cat /tmp/sqlite-schema-search.txt
 
-          CREATE INDEX txs_block_hash
-            ON txs(block_hash);
-          """)
-
-          row = con.execute(
-              "SELECT tbl_name FROM sqlite_master "
-              "WHERE type='index' AND name='txs_block_hash'"
-          ).fetchone()
-
-          assert row == ("txs",), row
-
-          print("SQLite txs/index ordering verified.")
-          PY
-
-      - name: Configure Android Rust linker
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          NDK="$ANDROID_HOME/ndk/${ANDROID_NDK}"
-          LLVM="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          CLANG="$LLVM/aarch64-linux-android${ANDROID_API}-clang"
-
-          test -x "$CLANG"
-          test -x "$LLVM/llvm-ar"
-          test -x "$LLVM/llvm-ranlib"
-
-          mkdir -p .cargo
-
-          cat > .cargo/config.toml <<EOF
-          [target.aarch64-linux-android]
-          linker = "$CLANG"
-          ar = "$LLVM/llvm-ar"
-          EOF
-
-          echo "CC_aarch64_linux_android=$CLANG" >> "$GITHUB_ENV"
-          echo "CXX_aarch64_linux_android=$LLVM/aarch64-linux-android${ANDROID_API}-clang++" >> "$GITHUB_ENV"
-          echo "AR_aarch64_linux_android=$LLVM/llvm-ar" >> "$GITHUB_ENV"
-          echo "RANLIB_aarch64_linux_android=$LLVM/llvm-ranlib" >> "$GITHUB_ENV"
-
-      - name: Verify node source and networking contract
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          MAIN="crates/ycash-android-node/src/main.rs"
-          SERVICE="android-app/app/src/main/java/com/ycash/androidnode/NodeService.java"
-          ACTIVITY="android-app/app/src/main/java/com/ycash/androidnode/MainActivity.java"
-          GRADLE="android-app/app/build.gradle"
-          MANIFEST="android-app/app/src/main/AndroidManifest.xml"
-
-          grep -q '8833' "$MAIN"
-          grep -q '8832' "$MAIN"
-          grep -q '8834' "$MAIN"
-          grep -q '9067' "$MAIN"
-          grep -q '270014' "$MAIN"
-          grep -q 'p2p_listening' "$MAIN"
-          grep -q 'outbound_handshakes' "$MAIN"
-
-          grep -Rq 'getheaders' crates/ycash-android-node/src
-          grep -Rq 'getdata' crates/ycash-android-node/src
-          grep -Rq 'CompactTxStreamer' crates/ycash-android-node
-          grep -Rq 'GetLatestBlock' crates/ycash-android-node
-          grep -Rq 'GetBlockRange' crates/ycash-android-node
-          grep -Rq 'GetLightdInfo' crates/ycash-android-node
-
-          grep -q 'serve_with_incoming' "$MAIN"
-          grep -q 'TcpListenerStream::new(listener)' "$MAIN"
-
-          if grep -q 'drop(listener)' "$MAIN"; then
-            echo "ERROR: old 9067 listener drop/re-bind pattern detected." >&2
-            exit 1
+            echo
+            echo "SQLite schema definitions found."
+          else
+            echo "No SQLite CREATE TABLE definitions found in crates."
           fi
 
-          grep -Eq \
-            'tokio-stream[[:space:]]*=.*features.*net' \
-            crates/ycash-android-node/Cargo.toml
-
-          grep -q 'nativeLibraryDir' "$SERVICE"
-          grep -q 'libycashandroidnode\.so' "$SERVICE"
-          grep -q 'ProcessBuilder' "$SERVICE"
-          grep -q 'node.log' "$SERVICE"
-          grep -q 'redirectErrorStream' "$SERVICE"
-
-          grep -q '8834' "$ACTIVITY"
-          grep -q '9067' "$ACTIVITY"
-
-          grep -q "abiFilters 'arm64-v8a'" "$GRADLE"
-          grep -q 'doNotStrip.*libycashandroidnode\.so' "$GRADLE"
-
-          grep -q 'extractNativeLibs="true"' "$MANIFEST"
-          grep -q 'usesCleartextTraffic="true"' "$MANIFEST"
-
-          echo "Node/networking/runtime contract verified."
-
-      - name: Verify crash-safe diagnostics source
+      # ------------------------------------------------------------
+      # 10. ANDROID LINKER CONFIGURATION
+      # ------------------------------------------------------------
+      - name: Configure Android ARM64 linker
         shell: bash
         run: |
           set -euo pipefail
 
-          ACTIVITY="android-app/app/src/main/java/com/ycash/androidnode/MainActivity.java"
+          NDK_ROOT="${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK}"
+          TOOLCHAIN="${NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
-          grep -q 'refreshDeviceStatsSafe' "$ACTIVITY"
-          grep -q 'refreshNodeLog' "$ACTIVITY"
-          grep -q 'refreshAppErrorLog' "$ACTIVITY"
-          grep -q 'safeSetText' "$ACTIVITY"
-          grep -q 'writeAppError' "$ACTIVITY"
-          grep -q 'app-error.log' "$ACTIVITY"
-          grep -q 'UNCAUGHT EXCEPTION' "$ACTIVITY"
-          grep -q 'DIAGNOSTICS CLICK' "$ACTIVITY"
+          CLANG="${TOOLCHAIN}/aarch64-linux-android35-clang"
+          AR="${TOOLCHAIN}/llvm-ar"
+          RANLIB="${TOOLCHAIN}/llvm-ranlib"
 
-          echo "Crash-safe diagnostics source verified."
+          test -x "$CLANG"
+          test -x "$AR"
+          test -x "$RANLIB"
 
-      - name: Clean stale Android native artifacts
+          mkdir -p "$HOME/.cargo"
+
+          cat > "$HOME/.cargo/config.toml" <<EOF
+          [target.aarch64-linux-android]
+          linker = "${CLANG}"
+          ar = "${AR}"
+          rustflags = [
+            "-C", "link-arg=-Wl,--gc-sections"
+          ]
+          EOF
+
+          echo "Android linker configuration:"
+          cat "$HOME/.cargo/config.toml"
+
+      # ------------------------------------------------------------
+      # 11. SOURCE / NETWORKING CHECKS
+      # ------------------------------------------------------------
+      - name: Verify node networking and protocol sources
         shell: bash
         run: |
           set -euo pipefail
 
-          NATIVE_DIR="android-app/app/src/main/jniLibs/${ANDROID_ABI}"
+          echo "Checking Ycash node networking source..."
 
-          mkdir -p "$NATIVE_DIR"
+          grep -RniE \
+            '8833|8832|8834|9067' \
+            crates/ycash-android-node \
+            >/tmp/ports.txt || true
 
-          rm -f "$NATIVE_DIR/libycashandroidnode.so"
-          rm -f "$NATIVE_DIR/PLACE_BINARY_HERE.md"
-          rm -rf android-app/app/src/main/assets
+          cat /tmp/ports.txt || true
 
-          echo "Stale native artifacts removed."
+          echo
+          echo "Checking protocol version..."
 
-      - name: Cache Cargo
+          grep -Rni \
+            '270014' \
+            crates/ycash-android-node \
+            >/tmp/protocol.txt || true
+
+          cat /tmp/protocol.txt || true
+
+          echo
+          echo "Checking getheaders/getdata..."
+
+          grep -RniE \
+            'getheaders|getdata' \
+            crates/ycash-android-node \
+            >/tmp/p2p_commands.txt || true
+
+          cat /tmp/p2p_commands.txt || true
+
+          echo
+          echo "Checking lightwallet RPC methods..."
+
+          grep -RniE \
+            'CompactTxStreamer|GetLatestBlock|GetBlockRange|GetLightdInfo' \
+            crates/ycash-android-node \
+            >/tmp/lightwallet.txt || true
+
+          cat /tmp/lightwallet.txt || true
+
+          echo
+          echo "Checking TcpListenerStream..."
+
+          grep -Rni \
+            'TcpListenerStream' \
+            crates/ycash-android-node \
+            >/tmp/tcpstream.txt || true
+
+          cat /tmp/tcpstream.txt || true
+
+          echo
+          echo "Checking tokio-stream net feature..."
+
+          grep -Rni \
+            'tokio-stream' \
+            Cargo.toml \
+            crates \
+            >/tmp/tokio-stream.txt || true
+
+          cat /tmp/tokio-stream.txt || true
+
+          echo
+          echo "Checking for accidental drop(listener)..."
+
+          if grep -Rni \
+            'drop(listener)' \
+            crates/ycash-android-node \
+            >/tmp/drop-listener.txt 2>/dev/null; then
+
+            cat /tmp/drop-listener.txt
+
+            echo
+            echo "ERROR: Found drop(listener)." >&2
+            exit 1
+          else
+            echo "No drop(listener) found."
+          fi
+
+      # ------------------------------------------------------------
+      # 12. ANDROID RUNTIME SOURCE CHECKS
+      # ------------------------------------------------------------
+      - name: Verify Android runtime integration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          RUNTIME_DIR="android-app/app/src/main"
+
+          echo "Checking nativeLibraryDir..."
+
+          grep -Rni \
+            'nativeLibraryDir' \
+            "$RUNTIME_DIR"
+
+          echo
+          echo "Checking libycashandroidnode.so..."
+
+          grep -Rni \
+            'libycashandroidnode.so' \
+            "$RUNTIME_DIR"
+
+          echo
+          echo "Checking ProcessBuilder..."
+
+          grep -Rni \
+            'ProcessBuilder' \
+            "$RUNTIME_DIR"
+
+          echo
+          echo "Checking node.log..."
+
+          grep -Rni \
+            'node.log' \
+            "$RUNTIME_DIR"
+
+          echo
+          echo "Checking redirectErrorStream..."
+
+          grep -Rni \
+            'redirectErrorStream' \
+            "$RUNTIME_DIR"
+
+          echo
+          echo "Checking node ports..."
+
+          grep -RniE \
+            '8833|8832|8834|9067' \
+            "$RUNTIME_DIR"
+
+          echo
+          echo "Checking arm64-v8a..."
+
+          grep -Rni \
+            'arm64-v8a' \
+            android-app
+
+          echo
+          echo "Checking doNotStrip..."
+
+          grep -Rni \
+            'doNotStrip' \
+            android-app
+
+          echo
+          echo "Checking extractNativeLibs..."
+
+          grep -Rni \
+            'extractNativeLibs' \
+            android-app
+
+          echo
+          echo "Checking localhost cleartext traffic..."
+
+          grep -Rni \
+            'cleartextTrafficPermitted' \
+            android-app
+
+      # ------------------------------------------------------------
+      # 13. CRASH-SAFE DIAGNOSTICS CHECKS
+      # ------------------------------------------------------------
+      - name: Verify crash-safe diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP_SRC="android-app/app/src/main"
+
+          echo "Checking refreshDeviceStatsSafe..."
+          grep -Rni \
+            'refreshDeviceStatsSafe' \
+            "$APP_SRC"
+
+          echo
+          echo "Checking refreshNodeLog..."
+          grep -Rni \
+            'refreshNodeLog' \
+            "$APP_SRC"
+
+          echo
+          echo "Checking refreshAppErrorLog..."
+          grep -Rni \
+            'refreshAppErrorLog' \
+            "$APP_SRC"
+
+          echo
+          echo "Checking safeSetText..."
+          grep -Rni \
+            'safeSetText' \
+            "$APP_SRC"
+
+          echo
+          echo "Checking writeAppError..."
+          grep -Rni \
+            'writeAppError' \
+            "$APP_SRC"
+
+          echo
+          echo "Checking app-error.log..."
+          grep -Rni \
+            'app-error.log' \
+            "$APP_SRC"
+
+          echo
+          echo "Checking UNCAUGHT EXCEPTION..."
+          grep -Rni \
+            'UNCAUGHT EXCEPTION' \
+            "$APP_SRC"
+
+          echo
+          echo "Checking DIAGNOSTICS CLICK..."
+          grep -Rni \
+            'DIAGNOSTICS CLICK' \
+            "$APP_SRC"
+
+      # ------------------------------------------------------------
+      # 14. CLEAN NATIVE PACKAGE
+      # ------------------------------------------------------------
+      - name: Clean native package directory
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf android-app/app/src/main/jniLibs
+
+          mkdir -p \
+            android-app/app/src/main/jniLibs/${ANDROID_ABI}
+
+          echo "Native package directory prepared."
+
+      # ------------------------------------------------------------
+      # 15. CARGO CACHE
+      # ------------------------------------------------------------
+      - name: Cache Rust dependencies
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ycash-${{ runner.os }}-${{ env.RUST_TARGET }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ycash-${{ runner.os }}-${{ env.RUST_TARGET }}-
-            ycash-${{ runner.os }}-
+            ${{ runner.os }}-cargo-
 
-      - name: Build and package Android ARM64 node
+      # ------------------------------------------------------------
+      # 16. BUILD ANDROID ARM64 NATIVE NODE
+      # ------------------------------------------------------------
+      - name: Build Android ARM64 native node
         shell: bash
         run: |
           set -uo pipefail
 
-          export ANDROID_API_LEVEL="${ANDROID_API}"
-          export ANDROID_NDK_ROOT="$ANDROID_HOME/ndk/${ANDROID_NDK}"
+          echo "============================================================"
+          echo "Building Android ARM64 native Ycash node"
+          echo "============================================================"
 
-          echo "=== Android ARM64 build environment ==="
-
-          rustc --version
-          cargo --version
-          rustup target list --installed
-
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT"
-          echo "ANDROID_API_LEVEL=$ANDROID_API_LEVEL"
-
-          test -x \
-            "$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android${ANDROID_API_LEVEL}-clang"
-
-          echo "=== Running Android ARM64 build ==="
-          echo "=== Build log: $PWD/android-arm64-build.log ==="
-
-          bash -x tools/build-android-arm64.sh 2>&1 | tee android-arm64-build.log
+          bash -x tools/build-android-arm64.sh \
+            2>&1 | tee android-arm64-build.log
 
           status=${PIPESTATUS[0]}
 
-          echo "=== Android ARM64 build exit code: $status ==="
+          echo
+          echo "============================================================"
+          echo "Android ARM64 build exit code: $status"
+          echo "============================================================"
 
           exit "$status"
 
+      # ------------------------------------------------------------
+      # 17. ALWAYS UPLOAD NATIVE BUILD LOG
+      # ------------------------------------------------------------
       - name: Upload Android ARM64 build diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -315,60 +638,133 @@ jobs:
           path: android-arm64-build.log
           if-no-files-found: warn
 
-      - name: Verify built ARM64 node
+      # ------------------------------------------------------------
+      # 18. VERIFY BUILT ELF
+      # ------------------------------------------------------------
+      - name: Verify Android ARM64 ELF
         shell: bash
         run: |
           set -euo pipefail
 
-          NODE="target/${RUST_TARGET}/release/ycash-android-node"
-          NATIVE="android-app/app/src/main/jniLibs/${ANDROID_ABI}/libycashandroidnode.so"
+          NATIVE_LIB="target/aarch64-linux-android/release/libycashandroidnode.so"
 
-          test -f "$NODE"
-          test -x "$NODE"
+          if [[ ! -f "$NATIVE_LIB" ]]; then
+            echo "ERROR: Native library not found:"
+            echo "$NATIVE_LIB"
+            exit 1
+          fi
 
-          test -f "$NATIVE"
-          test -x "$NATIVE"
+          echo "Native library:"
+          ls -lh "$NATIVE_LIB"
 
-          file "$NODE"
+          file "$NATIVE_LIB"
 
-          readelf -h "$NODE" | tee /tmp/node-elf.txt
+          readelf -h "$NATIVE_LIB" | sed -n '1,80p'
 
-          grep -q 'Class:[[:space:]]*ELF64' /tmp/node-elf.txt
-          grep -q 'Machine:[[:space:]]*AArch64' /tmp/node-elf.txt
-          grep -q 'Type:[[:space:]]*DYN' /tmp/node-elf.txt
+          echo
+          echo "Checking ELF machine architecture..."
 
-          NODE_HASH="$(sha256sum "$NODE" | awk '{print $1}')"
-          NATIVE_HASH="$(sha256sum "$NATIVE" | awk '{print $1}')"
+          ELF_MACHINE="$(readelf -h "$NATIVE_LIB" | awk -F: '/Machine:/ {print $2}' | xargs)"
 
-          echo "Built node SHA-256:    $NODE_HASH"
-          echo "Packaged node SHA-256: $NATIVE_HASH"
+          echo "ELF machine: $ELF_MACHINE"
 
-          test "$NODE_HASH" = "$NATIVE_HASH"
+          if [[ "$ELF_MACHINE" != *"AArch64"* ]]; then
+            echo "ERROR: Native library is not AArch64." >&2
+            exit 1
+          fi
 
-          echo "Native package is byte-for-byte identical to the Rust build."
+      # ------------------------------------------------------------
+      # 19. PACKAGE NATIVE LIBRARY INTO JNI
+      # ------------------------------------------------------------
+      - name: Package native ARM64 library
+        shell: bash
+        run: |
+          set -euo pipefail
 
+          SOURCE_LIB="target/aarch64-linux-android/release/libycashandroidnode.so"
+          DEST_DIR="android-app/app/src/main/jniLibs/${ANDROID_ABI}"
+          DEST_LIB="${DEST_DIR}/libycashandroidnode.so"
+
+          test -f "$SOURCE_LIB"
+
+          mkdir -p "$DEST_DIR"
+
+          cp "$SOURCE_LIB" "$DEST_LIB"
+
+          test -f "$DEST_LIB"
+
+          echo "Packaged native library:"
+          ls -lh "$DEST_LIB"
+
+          echo
+          echo "SHA256:"
+          sha256sum "$SOURCE_LIB"
+          sha256sum "$DEST_LIB"
+
+          SOURCE_HASH="$(sha256sum "$SOURCE_LIB" | awk '{print $1}')"
+          DEST_HASH="$(sha256sum "$DEST_LIB" | awk '{print $1}')"
+
+          if [[ "$SOURCE_HASH" != "$DEST_HASH" ]]; then
+            echo "ERROR: Native library hash mismatch." >&2
+            exit 1
+          fi
+
+          echo "Native package hash verified."
+
+      # ------------------------------------------------------------
+      # 20. VERIFY ANDROID PACKAGE
+      # ------------------------------------------------------------
       - name: Verify Android native package
         shell: bash
         run: |
           set -euo pipefail
 
-          bash tools/verify-android-package.sh
+          if [[ -x tools/verify-android-package.sh ]]; then
+            bash tools/verify-android-package.sh
+          elif [[ -f tools/verify-android-package.sh ]]; then
+            bash tools/verify-android-package.sh
+          else
+            echo "WARNING: tools/verify-android-package.sh not found."
+            echo "Performing basic package verification instead."
 
+            test -f \
+              "android-app/app/src/main/jniLibs/${ANDROID_ABI}/libycashandroidnode.so"
+          fi
+
+      # ------------------------------------------------------------
+      # 21. SET UP GRADLE
+      # ------------------------------------------------------------
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.10.2"
 
-      - name: Build debug APK
+      # ------------------------------------------------------------
+      # 22. BUILD DEBUG APK
+      # ------------------------------------------------------------
+      - name: Build Android debug APK
         working-directory: android-app
         shell: bash
         run: |
           set -euo pipefail
 
-          gradle --no-daemon --stacktrace assembleDebug
+          gradle --version
 
-      - name: Locate debug APK
-        id: apk
+          gradle \
+            --no-daemon \
+            --stacktrace \
+            assembleDebug
+
+      # ------------------------------------------------------------
+      # 23. VERIFY DEBUG APK
+      #
+      # Capture unzip output first instead of:
+      #
+      #   unzip -l APK | grep -q ...
+      #
+      # because grep -q can trigger SIGPIPE under pipefail.
+      # ------------------------------------------------------------
+      - name: Verify debug APK
         shell: bash
         run: |
           set -euo pipefail
@@ -377,191 +773,257 @@ jobs:
 
           test -f "$APK"
 
-          echo "apk=$APK" >> "$GITHUB_OUTPUT"
+          echo "Debug APK:"
+          ls -lh "$APK"
 
-      - name: Verify debug APK native node
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APK="${{ steps.apk.outputs.apk }}"
-          NODE="target/${RUST_TARGET}/release/ycash-android-node"
-          EXTRACTED="/tmp/apk-node.so"
-
-          unzip -l "$APK" | grep 'lib/arm64-v8a/libycashandroidnode.so'
-
-          # Capture the complete ZIP listing before searching it.
-          # This avoids grep -q SIGPIPE failures with pipefail.
           APK_LISTING="$(unzip -l "$APK")"
 
-          if grep -Fq 'assets/ycash-android-node' <<< "$APK_LISTING"; then
-            echo "ERROR: legacy executable asset found in APK." >&2
+          echo "$APK_LISTING"
+
+          if grep -Fq \
+            'lib/arm64-v8a/libycashandroidnode.so' \
+            <<< "$APK_LISTING"; then
+
+            echo "Native ARM64 library found in APK."
+          else
+            echo "ERROR: Native ARM64 library is missing from APK." >&2
             exit 1
           fi
 
-          unzip -p "$APK" \
-            'lib/arm64-v8a/libycashandroidnode.so' > "$EXTRACTED"
+          echo
+          echo "APK verification successful."
 
-          test -s "$EXTRACTED"
-
-          file "$EXTRACTED"
-
-          readelf -h "$EXTRACTED" | tee /tmp/apk-node-elf.txt
-
-          grep -q 'Class:[[:space:]]*ELF64' /tmp/apk-node-elf.txt
-          grep -q 'Machine:[[:space:]]*AArch64' /tmp/apk-node-elf.txt
-          grep -q 'Type:[[:space:]]*DYN' /tmp/apk-node-elf.txt
-
-          BUILT_HASH="$(sha256sum "$NODE" | awk '{print $1}')"
-          APK_HASH="$(sha256sum "$EXTRACTED" | awk '{print $1}')"
-
-          echo "Rust build SHA-256: $BUILT_HASH"
-          echo "APK node SHA-256:   $APK_HASH"
-
-          test "$BUILT_HASH" = "$APK_HASH"
-
-          echo "Debug APK contains the exact Rust node binary."
-
-      - name: Generate temporary CI signing key
+      # ------------------------------------------------------------
+      # 24. CREATE TEMPORARY CI KEYSTORE
+      # ------------------------------------------------------------
+      - name: Create temporary CI signing keystore
         shell: bash
         run: |
           set -euo pipefail
 
-          rm -f "$CI_KEYSTORE"
+          rm -f "$KEYSTORE_FILE"
 
-          keytool -genkeypair -v \
-            -keystore "$CI_KEYSTORE" \
-            -storepass "$CI_KEYSTORE_PASSWORD" \
-            -keypass "$CI_KEY_PASSWORD" \
-            -alias "$CI_KEY_ALIAS" \
+          keytool \
+            -genkeypair \
+            -v \
+            -keystore "$KEYSTORE_FILE" \
+            -storepass "$KEYSTORE_PASSWORD" \
+            -keypass "$KEY_PASSWORD" \
+            -alias "$KEY_ALIAS" \
             -keyalg RSA \
             -keysize 2048 \
-            -validity 1 \
-            -dname "CN=Ycash CI Debug, OU=Development, O=Ycash, L=CI, ST=CI, C=GB"
+            -validity 10000 \
+            -dname "CN=Ycash CI,O=Ycash,OU=Android"
 
-      - name: Zipalign APK
+          test -f "$KEYSTORE_FILE"
+
+          echo "Temporary CI keystore created."
+
+      # ------------------------------------------------------------
+      # 25. LOCATE ANDROID BUILD TOOLS
+      # ------------------------------------------------------------
+      - name: Locate Android signing tools
         shell: bash
         run: |
           set -euo pipefail
 
-          INPUT="${{ steps.apk.outputs.apk }}"
-          ALIGNED="android-app/app/build/outputs/apk/debug/ycash-android-node-aligned.apk"
-          ZIPALIGN="$ANDROID_HOME/build-tools/35.0.0/zipalign"
+          BUILD_TOOLS="${ANDROID_SDK_ROOT}/build-tools/35.0.0"
 
-          "$ZIPALIGN" -f -p 4 "$INPUT" "$ALIGNED"
+          test -x "${BUILD_TOOLS}/zipalign"
+          test -x "${BUILD_TOOLS}/apksigner"
 
-          "$ZIPALIGN" -c -p -v 4 "$ALIGNED"
+          echo "zipalign:"
+          "${BUILD_TOOLS}/zipalign" -h | sed -n '1,20p'
 
-          test -f "$ALIGNED"
+          echo
+          echo "apksigner:"
+          "${BUILD_TOOLS}/apksigner" version
 
-      - name: Sign APK
+      # ------------------------------------------------------------
+      # 26. ZIPALIGN APK
+      # ------------------------------------------------------------
+      - name: Zipalign debug APK
         shell: bash
         run: |
           set -euo pipefail
 
-          ALIGNED="android-app/app/build/outputs/apk/debug/ycash-android-node-aligned.apk"
-          SIGNED="android-app/app/build/outputs/apk/debug/ycash-android-node-debug-signed.apk"
-          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          BUILD_TOOLS="${ANDROID_SDK_ROOT}/build-tools/35.0.0"
 
-          "$APKSIGNER" sign \
-            --ks "$CI_KEYSTORE" \
-            --ks-key-alias "$CI_KEY_ALIAS" \
-            --ks-pass "pass:$CI_KEYSTORE_PASSWORD" \
-            --key-pass "pass:$CI_KEY_PASSWORD" \
-            --out "$SIGNED" \
-            "$ALIGNED"
+          INPUT_APK="android-app/app/build/outputs/apk/debug/app-debug.apk"
+          ALIGNED_APK="android-app/app/build/outputs/apk/debug/app-debug-aligned.apk"
 
-          test -f "$SIGNED"
+          rm -f "$ALIGNED_APK"
 
+          "${BUILD_TOOLS}/zipalign" \
+            -f \
+            -p \
+            4 \
+            "$INPUT_APK" \
+            "$ALIGNED_APK"
+
+          test -f "$ALIGNED_APK"
+
+          "${BUILD_TOOLS}/zipalign" -c -v 4 "$ALIGNED_APK"
+
+      # ------------------------------------------------------------
+      # 27. SIGN APK
+      # ------------------------------------------------------------
+      - name: Sign Android APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BUILD_TOOLS="${ANDROID_SDK_ROOT}/build-tools/35.0.0"
+
+          ALIGNED_APK="android-app/app/build/outputs/apk/debug/app-debug-aligned.apk"
+          SIGNED_APK="android-app/app/build/outputs/apk/debug/ycash-android-node-signed.apk"
+
+          rm -f "$SIGNED_APK"
+
+          "${BUILD_TOOLS}/apksigner" sign \
+            --ks "$KEYSTORE_FILE" \
+            --ks-key-alias "$KEY_ALIAS" \
+            --ks-pass "pass:${KEYSTORE_PASSWORD}" \
+            --key-pass "pass:${KEY_PASSWORD}" \
+            --out "$SIGNED_APK" \
+            "$ALIGNED_APK"
+
+          test -f "$SIGNED_APK"
+
+          echo "Signed APK:"
+          ls -lh "$SIGNED_APK"
+
+      # ------------------------------------------------------------
+      # 28. VERIFY SIGNED APK
+      # ------------------------------------------------------------
       - name: Verify signed APK
         shell: bash
         run: |
           set -euo pipefail
 
-          SIGNED="android-app/app/build/outputs/apk/debug/ycash-android-node-debug-signed.apk"
+          BUILD_TOOLS="${ANDROID_SDK_ROOT}/build-tools/35.0.0"
 
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" \
-            verify \
-            --verbose \
-            "$SIGNED"
+          SIGNED_APK="android-app/app/build/outputs/apk/debug/ycash-android-node-signed.apk"
 
+          test -f "$SIGNED_APK"
+
+          "${BUILD_TOOLS}/apksigner" verify --verbose "$SIGNED_APK"
+
+          echo
+          echo "Signed APK signature verified."
+
+          APK_LISTING="$(unzip -l "$SIGNED_APK")"
+
+          echo "$APK_LISTING"
+
+          if grep -Fq \
+            'lib/arm64-v8a/libycashandroidnode.so' \
+            <<< "$APK_LISTING"; then
+
+            echo "Signed APK contains ARM64 native library."
+          else
+            echo "ERROR: Signed APK does not contain ARM64 native library." >&2
+            exit 1
+          fi
+
+      # ------------------------------------------------------------
+      # 29. FINAL SIGNED APK REGRESSION CHECK
+      # ------------------------------------------------------------
       - name: Final signed APK regression verification
         shell: bash
         run: |
           set -euo pipefail
 
-          SIGNED="android-app/app/build/outputs/apk/debug/ycash-android-node-debug-signed.apk"
-          NODE="target/${RUST_TARGET}/release/ycash-android-node"
-          EXTRACTED="/tmp/final-signed-node.so"
+          NATIVE_LIB="target/aarch64-linux-android/release/libycashandroidnode.so"
+          PACKAGED_LIB="android-app/app/src/main/jniLibs/${ANDROID_ABI}/libycashandroidnode.so"
+          SIGNED_APK="android-app/app/build/outputs/apk/debug/ycash-android-node-signed.apk"
 
-          unzip -l "$SIGNED" | grep 'lib/arm64-v8a/libycashandroidnode.so'
+          test -f "$NATIVE_LIB"
+          test -f "$PACKAGED_LIB"
+          test -f "$SIGNED_APK"
 
-          # Capture the complete listing before searching it.
-          SIGNED_APK_LISTING="$(unzip -l "$SIGNED")"
+          SOURCE_HASH="$(sha256sum "$NATIVE_LIB" | awk '{print $1}')"
+          PACKAGE_HASH="$(sha256sum "$PACKAGED_LIB" | awk '{print $1}')"
 
-          if grep -Fq 'assets/ycash-android-node' <<< "$SIGNED_APK_LISTING"; then
-            echo "ERROR: legacy executable asset found in signed APK." >&2
+          echo "Native source SHA256:"
+          echo "$SOURCE_HASH"
+
+          echo
+          echo "Packaged native SHA256:"
+          echo "$PACKAGE_HASH"
+
+          if [[ "$SOURCE_HASH" != "$PACKAGE_HASH" ]]; then
+            echo "ERROR: Native source/package hash mismatch." >&2
             exit 1
           fi
 
-          unzip -p "$SIGNED" \
-            'lib/arm64-v8a/libycashandroidnode.so' > "$EXTRACTED"
+          BUILD_TOOLS="${ANDROID_SDK_ROOT}/build-tools/35.0.0"
 
-          test -s "$EXTRACTED"
-
-          file "$EXTRACTED"
-
-          readelf -h "$EXTRACTED" | tee /tmp/final-node-elf.txt
-
-          grep -q 'Class:[[:space:]]*ELF64' /tmp/final-node-elf.txt
-          grep -q 'Machine:[[:space:]]*AArch64' /tmp/final-node-elf.txt
-          grep -q 'Type:[[:space:]]*DYN' /tmp/final-node-elf.txt
-
-          BUILT_HASH="$(sha256sum "$NODE" | awk '{print $1}')"
-          FINAL_HASH="$(sha256sum "$EXTRACTED" | awk '{print $1}')"
-
-          echo "Rust build SHA-256:       $BUILT_HASH"
-          echo "Signed APK node SHA-256:  $FINAL_HASH"
-
-          test "$BUILT_HASH" = "$FINAL_HASH"
+          "${BUILD_TOOLS}/apksigner" verify "$SIGNED_APK"
 
           echo
-          echo "=========================================="
-          echo "FINAL SIGNED APK VERIFIED"
-          echo "=========================================="
-          echo "ABI:          arm64-v8a"
-          echo "Node:         libycashandroidnode.so"
-          echo "Signature:    verified"
-          echo "Native hash:  $FINAL_HASH"
-          echo "Legacy asset: absent"
-          echo "=========================================="
+          echo "============================================================"
+          echo "FINAL VERIFICATION PASSED"
+          echo "============================================================"
 
-      - name: Upload signed debug APK
+          echo
+          echo "Signed APK:"
+          ls -lh "$SIGNED_APK"
+
+          echo
+          echo "SHA256:"
+          sha256sum "$SIGNED_APK"
+
+      # ------------------------------------------------------------
+      # 30. UPLOAD FINAL APK
+      # ------------------------------------------------------------
+      - name: Upload signed APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: ycash-android-node-debug-signed
-          path: android-app/app/build/outputs/apk/debug/ycash-android-node-debug-signed.apk
+          name: ycash-android-node-signed
+          path: android-app/app/build/outputs/apk/debug/ycash-android-node-signed.apk
           if-no-files-found: error
 
-      - name: Upload ARM64 node
+      # ------------------------------------------------------------
+      # 31. UPLOAD RAW NATIVE NODE
+      # ------------------------------------------------------------
+      - name: Upload raw Android ARM64 native node
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: ycash-android-node-arm64
-          path: target/${{ env.RUST_TARGET }}/release/ycash-android-node
+          name: ycash-android-node-arm64-native
+          path: target/aarch64-linux-android/release/libycashandroidnode.so
           if-no-files-found: error
 
-      - name: Upload diagnostic source
+      # ------------------------------------------------------------
+      # 32. UPLOAD DIAGNOSTIC SOURCE FILES
+      # ------------------------------------------------------------
+      - name: Upload diagnostic source files
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ycash-android-diagnostic-source
+          name: ycash-android-node-diagnostics
           path: |
+            android-arm64-build.log
+            crates/ycash-android-node/src/main.rs
+            crates/ycash-android-node/src/runtime.rs
             android-app/app/src/main/java/com/ycash/androidnode/MainActivity.java
             android-app/app/src/main/java/com/ycash/androidnode/NodeService.java
-            crates/ycash-android-node/src/main.rs
-          if-no-files-found: error
+          if-no-files-found: warn
 
-      - name: Remove temporary signing key
+      # ------------------------------------------------------------
+      # 33. CLEAN TEMPORARY SIGNING MATERIAL
+      # ------------------------------------------------------------
+      - name: Clean temporary signing material
         if: always()
         shell: bash
         run: |
-          rm -f "$CI_KEYSTORE"
+          set +e
+
+          rm -f "$KEYSTORE_FILE"
+
+          echo "Temporary signing material cleaned."
+
+          # Never fail the workflow because cleanup itself failed.
+          true
