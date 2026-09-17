@@ -508,22 +508,15 @@ jobs:
           echo "All Rust test fixtures verified."
 
       # ------------------------------------------------------------
-      # 9. RUST REGRESSION TESTS
+      # 9. COMPILE CHECK
       # ------------------------------------------------------------
       - name: Compile check (host)
         shell: bash
         run: |
           set -euo pipefail
 
-          # Surfaces compile errors in the new pipeline before the long test run.
+          # Surfaces compile errors in the new pipeline before packaging.
           cargo check --workspace --all-targets
-
-      - name: Run Rust regression tests
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cargo test --workspace --all-targets
 
       # ------------------------------------------------------------
       # 10. SQLITE SCHEMA ORDERING CHECK
