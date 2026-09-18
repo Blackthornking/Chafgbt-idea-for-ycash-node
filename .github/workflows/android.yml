@@ -254,6 +254,11 @@ jobs:
           test -f crates/ycash-android-node/src/main.rs
           test -f crates/ycash-android-node/src/runtime.rs
 
+          # RocksDB state backend (v0.32+).
+          test -f crates/state/src/db.rs
+          test -f crates/state/src/lib.rs
+          test -f crates/state/src/chainstate.rs
+
           test -f android-app/app/build.gradle
           test -f android-app/app/src/main/AndroidManifest.xml
 
@@ -300,6 +305,8 @@ jobs:
           PIPE="crates/ycash-android-node/src/pipeline_sync.rs"
           MAIN="crates/ycash-android-node/src/main.rs"
           CONS="crates/consensus/src/lib.rs"
+          STATE="crates/state/src/lib.rs"
+          STATE_DB="crates/state/src/db.rs"
 
           fail=0
           warns=0
@@ -346,9 +353,15 @@ jobs:
           want "fn committer_loop" "$PIPE" "ordered committer"
           want "sync_channel::<VerifyJob>" "$PIPE" "bounded verify channel"
           want "const HEDGE_AFTER" "$PIPE" "hedged head-of-line range"
-          want "fn open_reader" crates/state/src/lib.rs "read-only header connection"
           want "pub struct ProofBatch" "$CONS" "batched Sapling proof verification"
           want "pub struct SaplingBatch" crates/ycash-crypto/src/batch.rs "Groth16 batch verifier"
+
+          # State backend (v0.32+: RocksDB replaced SQLite)
+          want "pub fn read_view" "$STATE_DB" "RocksDB snapshot read view"
+          want "pub const COLUMN_FAMILIES" "$STATE_DB" "column family set"
+          want "pub fn apply_prepared_commit" "$STATE" "ordered atomic commit"
+          want "fn stage_rollback" "$STATE" "atomic reorg rollback"
+
           if [[ -f "$PIPE" ]] && grep -Fq "let workers = 1usize;" "$PIPE"; then
             echo "WARN: sequential worker clamp present"; warns=$((warns+1))
           fi
@@ -437,12 +450,89 @@ jobs:
           echo "Android SDK and NDK verified."
 
       # ------------------------------------------------------------
+      # 5B. LIBCLANG (REQUIRED BY THE ROCKSDB STATE BACKEND)
+      # ------------------------------------------------------------
+      # librocksdb-sys generates its bindings with bindgen, which loads
+      # libclang at build-script time. The ubuntu-24.04 runner image has no
+      # libclang.so / llvm-config on PATH, so clang-sys panics and even
+      # `cargo check` fails before reaching any YORTAL crate. Installing it
+      # here (once) covers both the host check and the Android cross-build,
+      # because GITHUB_ENV values persist across later steps.
+      - name: Install libclang for RocksDB bindings
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "============================================================"
+          echo "Installing libclang / LLVM for bindgen"
+          echo "============================================================"
+
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang \
+            libclang-dev \
+            llvm-dev
+
+          LLVM_CONFIG="$(command -v llvm-config || true)"
+
+          if [[ -z "$LLVM_CONFIG" ]]; then
+            echo "ERROR: llvm-config is still not on PATH after installation." >&2
+            exit 1
+          fi
+
+          LIBDIR="$($LLVM_CONFIG --libdir)"
+
+          echo
+          echo "llvm-config: $LLVM_CONFIG"
+          echo "LLVM libdir: $LIBDIR"
+
+          echo
+          echo "Shared libclang libraries found:"
+          ls -l "$LIBDIR"/libclang*.so* || true
+
+          if ! ls "$LIBDIR"/libclang.so* >/dev/null 2>&1; then
+            echo "ERROR: no libclang shared library in $LIBDIR." >&2
+            exit 1
+          fi
+
+          {
+            echo "LIBCLANG_PATH=${LIBDIR}"
+            echo "LLVM_CONFIG_PATH=${LLVM_CONFIG}"
+          } >> "$GITHUB_ENV"
+
+          echo
+          echo "clang version:"
+          clang --version | sed -n '1,3p'
+
+          echo
+          echo "libclang is available to bindgen."
+
+      # ------------------------------------------------------------
       # 6. RUST
       # ------------------------------------------------------------
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ env.RUST_TARGET }}
+
+      # ------------------------------------------------------------
+      # 6B. CARGO CACHE
+      # ------------------------------------------------------------
+      # Restored BEFORE the host compile check, because that check is now
+      # what compiles the RocksDB C++ sources for the first time. With a cold
+      # cache expect roughly 5-15 minutes there, and again for the Android
+      # target; with a warm cache both are near-instant.
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ env.RUST_TARGET }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ env.RUST_TARGET }}-
+            ${{ runner.os }}-cargo-
 
       # ------------------------------------------------------------
       # 7. VERIFY RUST TARGET
@@ -515,33 +605,75 @@ jobs:
         run: |
           set -euo pipefail
 
+          echo "LIBCLANG_PATH=${LIBCLANG_PATH:-<not set>}"
+
           # Surfaces compile errors in the new pipeline before packaging.
+          # This also builds the RocksDB C++ sources for the host.
           cargo check --workspace --all-targets
 
       # ------------------------------------------------------------
-      # 10. SQLITE SCHEMA ORDERING CHECK
+      # 10. STATE BACKEND CHECK (RocksDB, formerly SQLite schema check)
       # ------------------------------------------------------------
-      - name: Verify SQLite schema ordering
+      - name: Verify RocksDB state backend
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Searching for SQLite schema definitions..."
+          echo "============================================================"
+          echo "Verifying the state backend"
+          echo "============================================================"
 
-          if grep -Rni \
-            --include='*.rs' \
-            --include='*.sql' \
-            'CREATE TABLE' \
-            crates \
-            >/tmp/sqlite-schema-search.txt 2>/dev/null; then
+          echo
+          echo "Checking that no SQLite backend remains..."
 
-            cat /tmp/sqlite-schema-search.txt
-
+          if grep -Rni --include='*.rs' --include='*.toml' 'rusqlite' crates Cargo.toml \
+            >/tmp/sqlite-refs.txt 2>/dev/null; then
+            cat /tmp/sqlite-refs.txt
             echo
-            echo "SQLite schema definitions found."
-          else
-            echo "No SQLite CREATE TABLE definitions found in crates."
+            echo "ERROR: rusqlite references remain after the RocksDB migration." >&2
+            exit 1
           fi
+          echo "No rusqlite references."
+
+          if grep -Rn --include='*.rs' --include='*.sql' 'CREATE TABLE' crates \
+            >/tmp/sql-schema.txt 2>/dev/null; then
+            cat /tmp/sql-schema.txt
+            echo
+            echo "ERROR: SQL schema definitions remain after the RocksDB migration." >&2
+            exit 1
+          fi
+          echo "No SQL schema definitions."
+
+          echo
+          echo "Checking the RocksDB dependency..."
+
+          grep -n 'rocksdb' Cargo.toml
+          grep -n 'rocksdb' crates/state/Cargo.toml
+
+          echo
+          echo "Column families declared in code:"
+          sed -n '/pub const COLUMN_FAMILIES/,/];/p' crates/state/src/db.rs
+
+          echo
+          echo "Checking that the canonical tip is written in the commit batch..."
+          grep -Fq 'w.put_meta(db::META_TIP_HASH' crates/state/src/lib.rs
+          grep -Fq 'fn stage_rollback' crates/state/src/lib.rs
+
+          echo
+          echo "Checking the Android database path is a directory, not a file..."
+          grep -n 'ycash-node.rocksdb' \
+            android-app/app/src/main/java/com/ycash/androidnode/NodeService.java
+
+          if grep -Rn 'ycash-node.sqlite' \
+            android-app/app/src/main/java crates >/tmp/old-db-path.txt 2>/dev/null; then
+            cat /tmp/old-db-path.txt
+            echo
+            echo "ERROR: the old SQLite database path is still referenced." >&2
+            exit 1
+          fi
+
+          echo
+          echo "RocksDB state backend verified."
 
       # ------------------------------------------------------------
       # 11. ANDROID ARM64 TOOLCHAIN CONFIGURATION
@@ -571,7 +703,16 @@ jobs:
             exit 1
           fi
 
+          SYSROOT="${NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+
+          if [[ ! -d "$SYSROOT" ]]; then
+            echo "ERROR: NDK sysroot does not exist:"
+            echo "$SYSROOT"
+            exit 1
+          fi
+
           CLANG="${TOOLCHAIN}/aarch64-linux-android${ANDROID_API}-clang"
+          CLANGXX="${TOOLCHAIN}/aarch64-linux-android${ANDROID_API}-clang++"
           AR="${TOOLCHAIN}/llvm-ar"
           RANLIB="${TOOLCHAIN}/llvm-ranlib"
           STRIP="${TOOLCHAIN}/llvm-strip"
@@ -595,6 +736,8 @@ jobs:
             exit 1
           fi
 
+          # RocksDB is C++: the Android clang++ driver is now required too.
+          test -x "$CLANGXX"
           test -x "$AR"
           test -x "$RANLIB"
           test -x "$STRIP"
@@ -602,9 +745,11 @@ jobs:
           echo
           echo "FOUND:"
           echo "  $CLANG"
+          echo "  $CLANGXX"
           echo "  $AR"
           echo "  $RANLIB"
           echo "  $STRIP"
+          echo "  $SYSROOT"
 
           TOOL_WRAPPER_DIR="$RUNNER_TEMP/android-aarch64-tools"
 
@@ -631,9 +776,19 @@ jobs:
           exec "$CLANG" "\$@"
           EOF
 
+          cat > "$TOOL_WRAPPER_DIR/aarch64-linux-android-clang++" <<EOF
+          #!/usr/bin/env bash
+          exec "$CLANGXX" "\$@"
+          EOF
+
           cat > "$TOOL_WRAPPER_DIR/aarch64-linux-android${ANDROID_API}-clang" <<EOF
           #!/usr/bin/env bash
           exec "$CLANG" "\$@"
+          EOF
+
+          cat > "$TOOL_WRAPPER_DIR/aarch64-linux-android${ANDROID_API}-clang++" <<EOF
+          #!/usr/bin/env bash
+          exec "$CLANGXX" "\$@"
           EOF
 
           chmod +x \
@@ -641,7 +796,9 @@ jobs:
             "$TOOL_WRAPPER_DIR/aarch64-linux-android-ranlib" \
             "$TOOL_WRAPPER_DIR/aarch64-linux-android-strip" \
             "$TOOL_WRAPPER_DIR/aarch64-linux-android-clang" \
-            "$TOOL_WRAPPER_DIR/aarch64-linux-android${ANDROID_API}-clang"
+            "$TOOL_WRAPPER_DIR/aarch64-linux-android-clang++" \
+            "$TOOL_WRAPPER_DIR/aarch64-linux-android${ANDROID_API}-clang" \
+            "$TOOL_WRAPPER_DIR/aarch64-linux-android${ANDROID_API}-clang++"
 
           echo
           echo "============================================================"
@@ -659,9 +816,16 @@ jobs:
             echo "ANDROID_NDK_HOME=$NDK_ROOT"
             echo "NDK_ROOT=$NDK_ROOT"
             echo "ANDROID_NDK_ROOT=$NDK_ROOT"
+            echo "ANDROID_NDK_SYSROOT=$SYSROOT"
             echo "AR_aarch64_linux_android=$AR"
+            echo "RANLIB_aarch64_linux_android=$RANLIB"
             echo "CC_aarch64_linux_android=$CLANG"
+            echo "CXX_aarch64_linux_android=$CLANGXX"
             echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$CLANG"
+            # tools/build-android-arm64.sh appends -static-libstdc++ to this
+            # value, so libc++ is linked into the executable and no
+            # libc++_shared.so has to be packaged beside it.
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS=-C link-arg=-Wl,--gc-sections"
           } >> "$GITHUB_ENV"
 
           echo
@@ -671,13 +835,13 @@ jobs:
 
           mkdir -p "$HOME/.cargo"
 
+          # No [target.*] rustflags here: the environment variable set above
+          # would override them silently, which is how the static libc++ flag
+          # would otherwise get lost.
           cat > "$HOME/.cargo/config.toml" <<EOF
           [target.aarch64-linux-android]
           linker = "${CLANG}"
           ar = "${AR}"
-          rustflags = [
-            "-C", "link-arg=-Wl,--gc-sections"
-          ]
           EOF
 
           echo
@@ -693,6 +857,7 @@ jobs:
           command -v aarch64-linux-android-ranlib
           command -v aarch64-linux-android-strip
           command -v aarch64-linux-android-clang
+          command -v aarch64-linux-android-clang++
           command -v "aarch64-linux-android${ANDROID_API}-clang"
 
           echo
@@ -710,6 +875,10 @@ jobs:
           echo
           echo "ARM64 Clang:"
           aarch64-linux-android-clang --version | sed -n '1,5p'
+
+          echo
+          echo "ARM64 Clang++:"
+          aarch64-linux-android-clang++ --version | sed -n '1,5p'
 
           echo
           echo "API-level ARM64 Clang:"
@@ -747,6 +916,16 @@ jobs:
           echo "${ANDROID_NDK_ROOT:-<not set>}"
 
           echo
+          echo "NDK sysroot (used by bindgen for the RocksDB headers):"
+          echo "${ANDROID_NDK_SYSROOT:-<not set>}"
+          test -d "${ANDROID_NDK_SYSROOT}"
+
+          echo
+          echo "LIBCLANG_PATH:"
+          echo "${LIBCLANG_PATH:-<not set>}"
+          test -d "${LIBCLANG_PATH}"
+
+          echo
           echo "Requested NDK directory:"
           ls -ld "${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK}"
 
@@ -764,6 +943,14 @@ jobs:
 
           grep -nEi \
             'ANDROID_NDK|NDK_ROOT|ANDROID_NDK_HOME|ANDROID_NDK_ROOT|ndk/' \
+            tools/build-android-arm64.sh \
+            || true
+
+          echo
+          echo "Build script RocksDB cross-compilation setup:"
+
+          grep -nEi \
+            'BINDGEN_EXTRA_CLANG_ARGS|CXXSTDLIB|static-libstdc\+\+|libclang|llvm-ar' \
             tools/build-android-arm64.sh \
             || true
 
@@ -969,21 +1156,6 @@ jobs:
           echo "Native package directory prepared."
 
       # ------------------------------------------------------------
-      # 17. CARGO CACHE
-      # ------------------------------------------------------------
-      - name: Cache Rust dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ env.RUST_TARGET }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ env.RUST_TARGET }}-
-            ${{ runner.os }}-cargo-
-
-      # ------------------------------------------------------------
       # 18. FINAL TOOLCHAIN CHECK
       # ------------------------------------------------------------
       - name: Final Android ARM64 toolchain check
@@ -1004,6 +1176,10 @@ jobs:
           command -v aarch64-linux-android-clang
 
           echo
+          echo "CXX:"
+          command -v aarch64-linux-android-clang++
+
+          echo
           echo "AR:"
           command -v aarch64-linux-android-ar
 
@@ -1018,9 +1194,16 @@ jobs:
           echo
           echo "Resolved tool paths:"
           readlink -f "$(command -v aarch64-linux-android-clang)"
+          readlink -f "$(command -v aarch64-linux-android-clang++)"
           readlink -f "$(command -v aarch64-linux-android-ar)"
           readlink -f "$(command -v aarch64-linux-android-ranlib)"
           readlink -f "$(command -v aarch64-linux-android-strip)"
+
+          echo
+          echo "bindgen / RocksDB environment:"
+          echo "  LIBCLANG_PATH=${LIBCLANG_PATH:-<not set>}"
+          echo "  ANDROID_NDK_SYSROOT=${ANDROID_NDK_SYSROOT:-<not set>}"
+          echo "  CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS=${CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS:-<not set>}"
 
           echo
           echo "Rust target:"
@@ -1056,6 +1239,11 @@ jobs:
           echo "ANDROID_NDK_HOME=${ANDROID_NDK_HOME:-}"
           echo "RUST_TARGET=${RUST_TARGET}"
           echo "ANDROID_ABI=${ANDROID_ABI}"
+          echo "LIBCLANG_PATH=${LIBCLANG_PATH:-}"
+
+          echo
+          echo "NOTE: this step cross-compiles the RocksDB C++ sources for"
+          echo "      ARM64. On a cold cache that takes several minutes."
 
           echo
           echo "============================================================"
@@ -1223,6 +1411,28 @@ jobs:
               exit 1
               ;;
           esac
+
+          echo
+          echo "============================================================"
+          echo "Checking shared library dependencies"
+          echo "============================================================"
+
+          # RocksDB pulls in libc++. The build links it statically, so nothing
+          # named libc++_shared.so may appear here: the node ships as a single
+          # executable and nothing else would be packaged beside it.
+          NEEDED="$(readelf -d "$NATIVE_LIB" | awk '/NEEDED/ {print $NF}' | tr -d '[]')"
+
+          echo "$NEEDED"
+
+          if grep -Fq 'libc++_shared.so' <<< "$NEEDED"; then
+            echo
+            echo "ERROR: the node links libc++_shared.so, which is not packaged in the APK." >&2
+            echo "       tools/build-android-arm64.sh must link libc++ statically." >&2
+            exit 1
+          fi
+
+          echo
+          echo "No shared libc++ dependency."
 
           echo
           echo "AArch64 Android native library verified successfully."
@@ -1636,6 +1846,11 @@ jobs:
             crates/consensus/src/lib.rs
             config/pipeline.toml
             crates/state/src/lib.rs
+            crates/state/src/db.rs
+            crates/state/src/chainstate.rs
+            crates/state/Cargo.toml
+            Cargo.toml
+            tools/build-android-arm64.sh
             BUILD_ID.txt
             *.md
             android-app/app/src/main/java/com/ycash/androidnode/MainActivity.java
